@@ -17,6 +17,9 @@ const configSchema = z.object({
     timeoutMs: z.number().int().positive().default(300000), // 5 minutes
     defaultAction: z.enum(["approve", "reject"]).default("approve"),
   }),
+  pty: z.object({
+    workingDir: z.string().min(1, "CLAUDE_WORKING_DIR is required"),
+  }),
   log: z.object({
     level: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
   }),
@@ -38,6 +41,9 @@ function loadConfig(): Config {
     approval: {
       timeoutMs: parseInt(process.env["APPROVAL_TIMEOUT_MS"] ?? "300000", 10),
       defaultAction: process.env["APPROVAL_DEFAULT_ACTION"] ?? "approve",
+    },
+    pty: {
+      workingDir: process.env["CLAUDE_WORKING_DIR"] ?? process.cwd(),
     },
     log: {
       level: process.env["LOG_LEVEL"] ?? "info",

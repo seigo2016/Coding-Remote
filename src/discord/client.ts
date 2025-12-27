@@ -6,24 +6,34 @@ import {
   ButtonBuilder,
   ButtonStyle,
   ComponentType,
+  REST,
+  Routes,
+  SlashCommandBuilder,
   type TextChannel,
   type Message,
+  type ChatInputCommandInteraction,
 } from "discord.js";
+import { EventEmitter } from "events";
 import { config } from "../config/index.js";
 import { createChildLogger } from "../utils/logger.js";
 import { ApprovalAction, type ToolApprovalRequest } from "./types.js";
 
 const logger = createChildLogger("discord");
 
-export class DiscordBot {
+export class DiscordBot extends EventEmitter {
   private client: Client;
+  private rest: REST;
   private channel: TextChannel | null = null;
   private ready = false;
 
   constructor() {
+    super();
+
     this.client = new Client({
       intents: [GatewayIntentBits.Guilds],
     });
+
+    this.rest = new REST({ version: "10" }).setToken(config.discord.botToken);
 
     this.setupEventHandlers();
   }
@@ -45,9 +55,70 @@ export class DiscordBot {
       this.ready = true;
     });
 
+    this.client.on("interactionCreate", async (interaction) => {
+      if (!interaction.isChatInputCommand()) return;
+
+      // Verify owner
+      if (interaction.user.id !== config.discord.ownerId) {
+        await interaction.reply({
+          content: "⛔ You are not authorized to use this bot.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      await this.handleCommand(interaction);
+    });
+
     this.client.on("error", (error) => {
       logger.error({ error }, "Discord client error");
     });
+  }
+
+  private async handleCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+    const { commandName } = interaction;
+
+    try {
+      switch (commandName) {
+        case "continue":
+          await interaction.deferReply();
+          this.emit("command:continue", interaction);
+          break;
+
+        case "ask":
+          await interaction.deferReply();
+          const prompt = interaction.options.getString("prompt", true);
+          this.emit("command:ask", prompt, interaction);
+          break;
+
+        case "output":
+          await interaction.deferReply();
+          const lines = interaction.options.getInteger("lines") ?? 50;
+          this.emit("command:output", lines, interaction);
+          break;
+
+        case "stop":
+          await interaction.deferReply();
+          this.emit("command:stop", interaction);
+          break;
+
+        case "status":
+          await interaction.deferReply();
+          this.emit("command:status", interaction);
+          break;
+
+        default:
+          await interaction.reply({ content: "Unknown command", ephemeral: true });
+      }
+    } catch (error) {
+      logger.error({ error, command: commandName }, "Command error");
+      const content = "❌ An error occurred while executing the command.";
+      if (interaction.deferred) {
+        await interaction.editReply({ content });
+      } else {
+        await interaction.reply({ content, ephemeral: true });
+      }
+    }
   }
 
   async connect(): Promise<void> {
@@ -56,6 +127,46 @@ export class DiscordBot {
     // Wait for ready
     while (!this.ready) {
       await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
+  async registerCommands(): Promise<void> {
+    const commands = [
+      new SlashCommandBuilder()
+        .setName("continue")
+        .setDescription("Start CLI session to continue from VSCode"),
+
+      new SlashCommandBuilder()
+        .setName("ask")
+        .setDescription("Send a prompt to Claude Code")
+        .addStringOption((opt) =>
+          opt.setName("prompt").setDescription("The prompt to send").setRequired(true)
+        ),
+
+      new SlashCommandBuilder()
+        .setName("output")
+        .setDescription("Show recent Claude Code output")
+        .addIntegerOption((opt) =>
+          opt.setName("lines").setDescription("Number of lines (default: 50)").setRequired(false)
+        ),
+
+      new SlashCommandBuilder()
+        .setName("stop")
+        .setDescription("Stop the CLI session"),
+
+      new SlashCommandBuilder()
+        .setName("status")
+        .setDescription("Show current session status"),
+    ];
+
+    try {
+      await this.rest.put(Routes.applicationCommands(this.client.user!.id), {
+        body: commands.map((c) => c.toJSON()),
+      });
+      logger.info({ count: commands.length }, "Registered slash commands");
+    } catch (error) {
+      logger.error({ error }, "Failed to register commands");
+      throw error;
     }
   }
 
@@ -75,7 +186,7 @@ export class DiscordBot {
 
     const message = await this.channel.send({ embeds: [embed], components: [row] });
 
-    return this.waitForApproval(message, embed, request.id);
+    return this.waitForApproval(message, embed);
   }
 
   private buildApprovalEmbed(request: ToolApprovalRequest): EmbedBuilder {
@@ -137,11 +248,7 @@ export class DiscordBot {
     );
   }
 
-  private waitForApproval(
-    message: Message,
-    embed: EmbedBuilder,
-    _requestId: string
-  ): Promise<ApprovalAction> {
+  private waitForApproval(message: Message, embed: EmbedBuilder): Promise<ApprovalAction> {
     return new Promise((resolve) => {
       const collector = message.createMessageComponentCollector({
         componentType: ComponentType.Button,
@@ -234,5 +341,41 @@ export class DiscordBot {
       .setTimestamp();
 
     await this.channel.send({ embeds: [embed] });
+  }
+
+  async sendOutput(content: string, title = "Claude Code 出力"): Promise<void> {
+    if (!this.channel) return;
+
+    const chunks = this.splitMessage(content, 1900);
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      if (!chunk) continue;
+
+      const embed = new EmbedBuilder()
+        .setTitle(chunks.length > 1 ? `${title} (${i + 1}/${chunks.length})` : title)
+        .setDescription(`\`\`\`\n${chunk}\n\`\`\``)
+        .setColor(0x3b82f6)
+        .setTimestamp();
+
+      await this.channel.send({ embeds: [embed] });
+    }
+  }
+
+  private splitMessage(content: string, maxLength: number): string[] {
+    const chunks: string[] = [];
+    let current = "";
+
+    for (const line of content.split("\n")) {
+      if (current.length + line.length + 1 > maxLength) {
+        if (current) chunks.push(current);
+        current = line;
+      } else {
+        current = current ? `${current}\n${line}` : line;
+      }
+    }
+
+    if (current) chunks.push(current);
+    return chunks.length ? chunks : ["(empty)"];
   }
 }
