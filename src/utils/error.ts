@@ -9,10 +9,10 @@ export class AppError extends Error {
   }
 }
 
-export class TmuxError extends AppError {
+export class ApiError extends AppError {
   constructor(message: string, cause?: unknown) {
-    super(message, "TMUX_ERROR", cause);
-    this.name = "TmuxError";
+    super(message, "API_ERROR", cause);
+    this.name = "ApiError";
   }
 }
 
@@ -20,12 +20,5 @@ export class DiscordError extends AppError {
   constructor(message: string, cause?: unknown) {
     super(message, "DISCORD_ERROR", cause);
     this.name = "DiscordError";
-  }
-}
-
-export class ParserError extends AppError {
-  constructor(message: string, cause?: unknown) {
-    super(message, "PARSER_ERROR", cause);
-    this.name = "ParserError";
   }
 }

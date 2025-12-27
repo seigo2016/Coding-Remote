@@ -1,30 +1,104 @@
-# Claude Discord Bot
+# Claude Code Approval Bot
 
-Discord経由でClaude Codeセッションをリモート操作するためのBot。
+Claude CodeのHooksと連携し、ツール実行の承認をDiscord経由で行うBot。
+
+## アーキテクチャ
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│           VSCode + Claude Code拡張（普段通り使用）           │
+│                          │                                  │
+│                          ↓ PreToolUse Hook                  │
+│              ┌───────────────────────────┐                  │
+│              │  hooks/pre-tool-use.js    │                  │
+│              │  → HTTP API に承認要求     │                  │
+│              └───────────────────────────┘                  │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│         Approval Bot（バックグラウンド常駐）                  │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  HTTP API Server ←→ Discord Bot                    │    │
+│  │  (localhost:3456)     (discord.js)                 │    │
+│  └─────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+                    ┌──────────────┐
+                    │   Discord    │
+                    │  承認ボタン   │
+                    └──────────────┘
+```
 
 ## プロジェクト構造
 
 ```
 src/
-├── index.ts                 # エントリーポイント
-├── config/                  # 設定管理 (zod validation)
-├── tmux/                    # tmuxセッション操作
-│   ├── manager.ts           # セッション作成・監視・入力
+├── index.ts              # エントリーポイント
+├── config/
+│   └── index.ts          # 設定管理 (zod)
+├── api/
+│   ├── server.ts         # HTTP APIサーバー
 │   └── types.ts
-├── parser/                  # Claude Code出力解析
-│   ├── claude-output.ts     # 状態検出パーサー
-│   ├── diff-formatter.ts    # diff整形
-│   └── types.ts
-├── discord/                 # Discord.js連携
-│   ├── client.ts            # Botクライアント
-│   └── types.ts
-├── session/                 # セッション管理
-│   ├── orchestrator.ts      # 全体統合
+├── discord/
+│   ├── client.ts         # Discord Bot（承認UI）
 │   └── types.ts
 └── utils/
-    ├── logger.ts            # pino logger
-    └── error.ts             # カスタムエラー
+    ├── logger.ts         # pino logger
+    └── error.ts          # カスタムエラー
+
+hooks/
+└── pre-tool-use.js       # Claude Code Hook スクリプト
 ```
+
+## セットアップ
+
+### 1. Bot起動
+
+```bash
+pnpm install
+cp .env.example .env
+# .env を編集してDiscordトークン等を設定
+pnpm dev  # または pnpm build && pnpm start
+```
+
+### 2. Claude Code Hooks設定
+
+`~/.claude/settings.json` に追加:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "command": "node /path/to/Coding-Remote/hooks/pre-tool-use.js"
+      }
+    ]
+  }
+}
+```
+
+### 3. 常駐化（オプション）
+
+```bash
+# PM2で常駐
+pm2 start pnpm --name "claude-approval-bot" -- start
+pm2 startup
+pm2 save
+```
+
+## 環境変数
+
+| 変数 | 説明 | デフォルト |
+|------|------|-----------|
+| `DISCORD_BOT_TOKEN` | Discord Bot トークン | (必須) |
+| `DISCORD_OWNER_ID` | 操作を許可するユーザーID | (必須) |
+| `DISCORD_CHANNEL_ID` | 通知先チャンネルID | (必須) |
+| `API_PORT` | APIサーバーポート | 3456 |
+| `API_HOST` | APIサーバーホスト | 127.0.0.1 |
+| `APPROVAL_TIMEOUT_MS` | 承認タイムアウト (ms) | 300000 |
+| `APPROVAL_DEFAULT_ACTION` | タイムアウト時の動作 | approve |
+| `LOG_LEVEL` | ログレベル | info |
 
 ## 開発コマンド
 
@@ -38,27 +112,10 @@ pnpm lint           # Lint
 pnpm test           # テスト
 ```
 
-## 環境変数
-
-`.env.example` を `.env` にコピーして設定:
-
-- `DISCORD_BOT_TOKEN`: Discord Bot トークン
-- `DISCORD_OWNER_ID`: 操作を許可するユーザーID
-- `DISCORD_CHANNEL_ID`: 通知先チャンネルID
-- `CLAUDE_WORKING_DIR`: 作業ディレクトリ
-- `TMUX_SESSION_NAME`: tmuxセッション名
-
-## アーキテクチャ
-
-1. **TmuxManager**: tmuxセッションを作成・監視、2秒ごとにポーリング
-2. **ClaudeOutputParser**: ターミナル出力を解析して状態検出
-3. **DiscordBot**: discord.js v14、スラッシュコマンド + ボタンUI
-4. **SessionOrchestrator**: 全体を統合、状態遷移管理
-
 ## 技術スタック
 
 - TypeScript 5.x
-- Node.js 20 LTS
+- Node.js 22 LTS
 - discord.js v14
 - pino (logging)
 - zod (validation)
