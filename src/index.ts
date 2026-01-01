@@ -42,20 +42,57 @@ async function main() {
   });
 
   // Discord command handlers
-  discord.on("command:continue", async (interaction: ChatInputCommandInteraction) => {
-    try {
-      if (pty.isRunning) {
-        await interaction.editReply("⚠️ セッションは既に実行中です");
-        return;
-      }
+  discord.on(
+    "command:sessions",
+    async (interaction: ChatInputCommandInteraction) => {
+      try {
+        const sessions = await pty.listSessions();
 
-      await pty.startSession();
-      await interaction.editReply("✅ Claude Code セッションを開始しました");
-    } catch (error) {
-      logger.error({ error }, "Failed to start session");
-      await interaction.editReply("❌ セッション開始に失敗しました");
+        if (sessions.length === 0) {
+          await interaction.editReply("📭 セッションが見つかりません");
+          return;
+        }
+
+        const sessionList = sessions
+          .slice(0, 10)
+          .map((s, i) => {
+            const date = s.lastModified.toLocaleString("ja-JP");
+            const summary = s.summary ? `\n   └ ${s.summary.slice(0, 50)}...` : "";
+            return `${i + 1}. \`${s.id}\`\n   📁 ${s.projectPath}\n   🕐 ${date}${summary}`;
+          })
+          .join("\n\n");
+
+        await interaction.editReply(
+          `**利用可能なセッション** (最新10件)\n\n${sessionList}\n\n` +
+            `💡 \`/continue session_id:<ID>\` で再開できます`
+        );
+      } catch (error) {
+        logger.error({ error }, "Failed to list sessions");
+        await interaction.editReply("❌ セッション一覧の取得に失敗しました");
+      }
     }
-  });
+  );
+
+  discord.on(
+    "command:continue",
+    async (sessionId: string | null, interaction: ChatInputCommandInteraction) => {
+      try {
+        if (pty.isRunning) {
+          await interaction.editReply("⚠️ セッションは既に実行中です");
+          return;
+        }
+
+        await pty.startSession(sessionId ?? undefined);
+        const msg = sessionId
+          ? `✅ セッション \`${sessionId}\` を再開しました`
+          : "✅ 最新のセッションを開始しました";
+        await interaction.editReply(msg);
+      } catch (error) {
+        logger.error({ error }, "Failed to start session");
+        await interaction.editReply("❌ セッション開始に失敗しました");
+      }
+    }
+  );
 
   discord.on("command:ask", async (prompt: string, interaction: ChatInputCommandInteraction) => {
     try {

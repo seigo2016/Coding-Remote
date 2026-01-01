@@ -1,7 +1,10 @@
 import * as pty from "node-pty";
 import { EventEmitter } from "events";
+import { readdir, readFile, stat } from "fs/promises";
+import { join } from "path";
+import { homedir } from "os";
 import { createChildLogger } from "../utils/logger.js";
-import type { PtyStatus, PtySession } from "./types.js";
+import type { PtyStatus, PtySession, ClaudeSession } from "./types.js";
 
 const logger = createChildLogger("pty");
 
@@ -30,17 +33,84 @@ export class PtyManager extends EventEmitter {
   }
 
   /**
-   * Start Claude Code CLI with --continue flag
+   * List available Claude Code sessions
    */
-  async startSession(): Promise<void> {
+  async listSessions(): Promise<ClaudeSession[]> {
+    const claudeDir = join(homedir(), ".claude", "projects");
+    const sessions: ClaudeSession[] = [];
+
+    try {
+      const projectDirs = await readdir(claudeDir);
+
+      for (const projectDir of projectDirs) {
+        const projectPath = join(claudeDir, projectDir);
+        const projectStat = await stat(projectPath);
+
+        if (!projectStat.isDirectory()) continue;
+
+        try {
+          const sessionFiles = await readdir(projectPath);
+          const jsonFiles = sessionFiles.filter((f) => f.endsWith(".json"));
+
+          for (const jsonFile of jsonFiles) {
+            const sessionPath = join(projectPath, jsonFile);
+            const sessionStat = await stat(sessionPath);
+            const sessionId = jsonFile.replace(".json", "");
+
+            let summary: string | undefined;
+            try {
+              const content = await readFile(sessionPath, "utf-8");
+              const data = JSON.parse(content);
+              if (data.conversationTitle) {
+                summary = data.conversationTitle;
+              } else if (Array.isArray(data.messages) && data.messages.length > 0) {
+                const firstUserMsg = data.messages.find(
+                  (m: { role?: string; content?: string }) => m.role === "user"
+                );
+                if (firstUserMsg?.content) {
+                  summary = firstUserMsg.content.slice(0, 100);
+                }
+              }
+            } catch {
+              // Ignore parse errors
+            }
+
+            sessions.push({
+              id: sessionId,
+              projectPath: decodeURIComponent(projectDir),
+              lastModified: sessionStat.mtime,
+              summary,
+            });
+          }
+        } catch {
+          // Ignore unreadable directories
+        }
+      }
+
+      // Sort by last modified, newest first
+      sessions.sort((a, b) => b.lastModified.getTime() - a.lastModified.getTime());
+
+      return sessions;
+    } catch (error) {
+      logger.error({ error }, "Failed to list sessions");
+      return [];
+    }
+  }
+
+  /**
+   * Start Claude Code CLI with --continue or --resume flag
+   */
+  async startSession(sessionId?: string): Promise<void> {
     if (this.ptyProcess) {
       logger.warn("Session already running");
       return;
     }
 
-    logger.info({ cwd: this.session.workingDir }, "Starting Claude Code session");
+    const args = sessionId ? ["--resume", sessionId] : ["--continue"];
 
-    this.ptyProcess = pty.spawn("claude", ["--continue"], {
+    logger.info({ cwd: this.session.workingDir, sessionId }, "Starting Claude Code session");
+
+    this.ptyProcess = pty.spawn("claude", args, {
       name: "xterm-256color",
       cols: 120,
       rows: 40,
@@ -50,6 +120,7 @@ export class PtyManager extends EventEmitter {
 
     this.session.status = "running";
     this.session.startedAt = new Date();
+    this.session.sessionId = sessionId;
     this.outputBuffer = "";
 
     this.ptyProcess.onData((data) => {

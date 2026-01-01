@@ -80,9 +80,16 @@ export class DiscordBot extends EventEmitter {
 
     try {
       switch (commandName) {
-        case "continue":
+        case "continue": {
           await interaction.deferReply();
-          this.emit("command:continue", interaction);
+          const sessionId = interaction.options.getString("session_id");
+          this.emit("command:continue", sessionId, interaction);
+          break;
+        }
+
+        case "sessions":
+          await interaction.deferReply();
+          this.emit("command:sessions", interaction);
           break;
 
         case "ask": {
@@ -135,8 +142,18 @@ export class DiscordBot extends EventEmitter {
   async registerCommands(): Promise<void> {
     const commands = [
       new SlashCommandBuilder()
+        .setName("sessions")
+        .setDescription("List available Claude Code sessions"),
+
+      new SlashCommandBuilder()
         .setName("continue")
-        .setDescription("Start CLI session to continue from VSCode"),
+        .setDescription("Start CLI session to continue from VSCode")
+        .addStringOption((opt) =>
+          opt
+            .setName("session_id")
+            .setDescription("Session ID to resume (optional, defaults to latest)")
+            .setRequired(false)
+        ),
 
       new SlashCommandBuilder()
         .setName("ask")

@@ -41,7 +41,8 @@ Claude CodeのHooksと連携し、ツール実行の承認をDiscord経由で行
 ### Discordコマンド
 | コマンド | 説明 |
 |---------|------|
-| `/continue` | CLIセッションを開始（`claude --continue`） |
+| `/sessions` | 利用可能なセッション一覧を表示 |
+| `/continue [session_id]` | CLIセッションを開始（省略時は最新） |
 | `/ask <prompt>` | プロンプトをCLIに送信 |
 | `/output [lines]` | 最新の出力を表示（デフォルト50行） |
 | `/stop` | CLIセッションを停止 |
