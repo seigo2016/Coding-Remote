@@ -85,17 +85,19 @@ export class DiscordBot extends EventEmitter {
           this.emit("command:continue", interaction);
           break;
 
-        case "ask":
+        case "ask": {
           await interaction.deferReply();
           const prompt = interaction.options.getString("prompt", true);
           this.emit("command:ask", prompt, interaction);
           break;
+        }
 
-        case "output":
+        case "output": {
           await interaction.deferReply();
           const lines = interaction.options.getInteger("lines") ?? 50;
           this.emit("command:output", lines, interaction);
           break;
+        }
 
         case "stop":
           await interaction.deferReply();
