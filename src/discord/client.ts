@@ -5,26 +5,39 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  StringSelectMenuBuilder,
   ComponentType,
   REST,
   Routes,
   SlashCommandBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   type TextChannel,
   type Message,
   type ChatInputCommandInteraction,
+  type AutocompleteInteraction,
+  type StringSelectMenuInteraction,
+  type ButtonInteraction,
+  type ModalSubmitInteraction,
 } from "discord.js";
 import { EventEmitter } from "events";
 import { config } from "../config/index.js";
 import { createChildLogger } from "../utils/logger.js";
 import { ApprovalAction, type ToolApprovalRequest } from "./types.js";
+import type { ClaudeSession } from "../pty/types.js";
 
 const logger = createChildLogger("discord");
+
+// Session cache for autocomplete
+let sessionCache: ClaudeSession[] = [];
 
 export class DiscordBot extends EventEmitter {
   private client: Client;
   private rest: REST;
   private channel: TextChannel | null = null;
   private ready = false;
+  private outputPages: Map<string, { pages: string[]; currentPage: number }> = new Map();
 
   constructor() {
     super();
@@ -38,11 +51,17 @@ export class DiscordBot extends EventEmitter {
     this.setupEventHandlers();
   }
 
+  /**
+   * Update session cache for autocomplete
+   */
+  updateSessionCache(sessions: ClaudeSession[]): void {
+    sessionCache = sessions;
+  }
+
   private setupEventHandlers(): void {
     this.client.once("ready", async () => {
       logger.info({ user: this.client.user?.tag }, "Discord bot is ready");
 
-      // Fetch the channel
       try {
         const channel = await this.client.channels.fetch(config.discord.channelId);
         if (channel?.isTextBased()) {
@@ -56,18 +75,29 @@ export class DiscordBot extends EventEmitter {
     });
 
     this.client.on("interactionCreate", async (interaction) => {
-      if (!interaction.isChatInputCommand()) return;
-
-      // Verify owner
+      // Verify owner for all interactions
       if (interaction.user.id !== config.discord.ownerId) {
-        await interaction.reply({
-          content: "⛔ You are not authorized to use this bot.",
-          ephemeral: true,
-        });
+        if (interaction.isRepliable()) {
+          await interaction.reply({
+            content: "⛔ You are not authorized to use this bot.",
+            ephemeral: true,
+          });
+        }
         return;
       }
 
-      await this.handleCommand(interaction);
+      // Handle different interaction types
+      if (interaction.isChatInputCommand()) {
+        await this.handleCommand(interaction);
+      } else if (interaction.isAutocomplete()) {
+        await this.handleAutocomplete(interaction);
+      } else if (interaction.isStringSelectMenu()) {
+        await this.handleSelectMenu(interaction);
+      } else if (interaction.isButton()) {
+        await this.handleButton(interaction);
+      } else if (interaction.isModalSubmit()) {
+        await this.handleModal(interaction);
+      }
     });
 
     this.client.on("error", (error) => {
@@ -80,6 +110,11 @@ export class DiscordBot extends EventEmitter {
 
     try {
       switch (commandName) {
+        case "sessions":
+          await interaction.deferReply();
+          this.emit("command:sessions", interaction);
+          break;
+
         case "continue": {
           await interaction.deferReply();
           const sessionId = interaction.options.getString("session_id");
@@ -87,15 +122,24 @@ export class DiscordBot extends EventEmitter {
           break;
         }
 
-        case "sessions":
-          await interaction.deferReply();
-          this.emit("command:sessions", interaction);
-          break;
-
         case "ask": {
-          await interaction.deferReply();
-          const prompt = interaction.options.getString("prompt", true);
-          this.emit("command:ask", prompt, interaction);
+          // Show modal for longer input
+          const modal = new ModalBuilder()
+            .setCustomId("ask_modal")
+            .setTitle("Claude Code にプロンプトを送信");
+
+          const promptInput = new TextInputBuilder()
+            .setCustomId("prompt_input")
+            .setLabel("プロンプト")
+            .setStyle(TextInputStyle.Paragraph)
+            .setPlaceholder("Claude に送信するプロンプトを入力...")
+            .setRequired(true)
+            .setMaxLength(4000);
+
+          const row = new ActionRowBuilder<TextInputBuilder>().addComponents(promptInput);
+          modal.addComponents(row);
+
+          await interaction.showModal(modal);
           break;
         }
 
@@ -121,19 +165,180 @@ export class DiscordBot extends EventEmitter {
       }
     } catch (error) {
       logger.error({ error, command: commandName }, "Command error");
-      const content = "❌ An error occurred while executing the command.";
+      const content = "❌ コマンドの実行中にエラーが発生しました";
       if (interaction.deferred) {
         await interaction.editReply({ content });
-      } else {
+      } else if (!interaction.replied) {
         await interaction.reply({ content, ephemeral: true });
       }
     }
   }
 
+  private async handleAutocomplete(interaction: AutocompleteInteraction): Promise<void> {
+    const focusedOption = interaction.options.getFocused(true);
+
+    if (focusedOption.name === "session_id") {
+      const query = focusedOption.value.toLowerCase();
+      const filtered = sessionCache
+        .filter(
+          (s) =>
+            s.id.toLowerCase().includes(query) ||
+            s.projectPath.toLowerCase().includes(query) ||
+            s.summary?.toLowerCase().includes(query)
+        )
+        .slice(0, 25)
+        .map((s) => ({
+          name: `${s.projectPath.split("/").pop()} - ${s.summary?.slice(0, 40) || s.id.slice(0, 8)}`,
+          value: s.id,
+        }));
+
+      await interaction.respond(filtered);
+    }
+  }
+
+  private async handleSelectMenu(interaction: StringSelectMenuInteraction): Promise<void> {
+    const [action, ...rest] = interaction.customId.split(":");
+
+    if (action === "session_select") {
+      const sessionId = interaction.values[0];
+      await interaction.deferUpdate();
+
+      // Update the message to show loading
+      await interaction.editReply({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle("🔄 セッション開始中...")
+            .setDescription(`セッション \`${sessionId}\` を開始しています...`)
+            .setColor(0x3b82f6),
+        ],
+        components: [],
+      });
+
+      this.emit("command:continue:select", sessionId, interaction);
+    } else if (action === "output_page") {
+      const messageId = rest.join(":");
+      const pageData = this.outputPages.get(messageId);
+      if (!pageData) return;
+
+      const selectedValue = interaction.values[0];
+      if (!selectedValue) return;
+
+      const newPage = parseInt(selectedValue, 10);
+      pageData.currentPage = newPage;
+
+      await this.updateOutputPage(interaction, pageData.pages, newPage, messageId);
+    }
+  }
+
+  private async handleButton(interaction: ButtonInteraction): Promise<void> {
+    const [action, ...rest] = interaction.customId.split(":");
+
+    // Approval buttons
+    if (Object.values(ApprovalAction).includes(action as ApprovalAction)) {
+      // Handled by waitForApproval collector
+      return;
+    }
+
+    // Session list buttons
+    if (action === "session_refresh") {
+      await interaction.deferUpdate();
+      this.emit("command:sessions:refresh", interaction);
+      return;
+    }
+
+    if (action === "session_start_latest") {
+      await interaction.deferUpdate();
+      this.emit("command:continue:select", null, interaction);
+      return;
+    }
+
+    // Output pagination buttons
+    if (action === "output_prev" || action === "output_next") {
+      const messageId = rest.join(":");
+      const pageData = this.outputPages.get(messageId);
+      if (!pageData) return;
+
+      const newPage =
+        action === "output_prev"
+          ? Math.max(0, pageData.currentPage - 1)
+          : Math.min(pageData.pages.length - 1, pageData.currentPage + 1);
+
+      if (newPage !== pageData.currentPage) {
+        pageData.currentPage = newPage;
+        await this.updateOutputPage(interaction, pageData.pages, newPage, messageId);
+      } else {
+        await interaction.deferUpdate();
+      }
+      return;
+    }
+
+    // Quick action buttons
+    if (action === "quick_stop") {
+      await interaction.deferUpdate();
+      this.emit("command:stop:quick", interaction);
+      return;
+    }
+
+    if (action === "quick_output") {
+      await interaction.deferUpdate();
+      this.emit("command:output:quick", 50, interaction);
+      return;
+    }
+  }
+
+  private async handleModal(interaction: ModalSubmitInteraction): Promise<void> {
+    if (interaction.customId === "ask_modal") {
+      await interaction.deferReply();
+      const prompt = interaction.fields.getTextInputValue("prompt_input");
+      this.emit("command:ask", prompt, interaction);
+    }
+  }
+
+  private async updateOutputPage(
+    interaction: ButtonInteraction | StringSelectMenuInteraction,
+    pages: string[],
+    currentPage: number,
+    messageId: string
+  ): Promise<void> {
+    const embed = new EmbedBuilder()
+      .setTitle(`📄 Claude Code 出力`)
+      .setDescription(`\`\`\`ansi\n${pages[currentPage]}\n\`\`\``)
+      .setColor(0x3b82f6)
+      .setFooter({ text: `ページ ${currentPage + 1}/${pages.length}` })
+      .setTimestamp();
+
+    const row = this.buildPaginationButtons(currentPage, pages.length, messageId);
+
+    await interaction.update({ embeds: [embed], components: [row] });
+  }
+
+  private buildPaginationButtons(
+    currentPage: number,
+    totalPages: number,
+    messageId: string
+  ): ActionRowBuilder<ButtonBuilder> {
+    return new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`output_prev:${messageId}`)
+        .setLabel("◀ 前へ")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(currentPage === 0),
+      new ButtonBuilder()
+        .setCustomId("page_indicator")
+        .setLabel(`${currentPage + 1} / ${totalPages}`)
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(true),
+      new ButtonBuilder()
+        .setCustomId(`output_next:${messageId}`)
+        .setLabel("次へ ▶")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(currentPage === totalPages - 1)
+    );
+  }
+
   async connect(): Promise<void> {
     await this.client.login(config.discord.botToken);
 
-    // Wait for ready
     while (!this.ready) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
@@ -143,39 +348,38 @@ export class DiscordBot extends EventEmitter {
     const commands = [
       new SlashCommandBuilder()
         .setName("sessions")
-        .setDescription("List available Claude Code sessions"),
+        .setDescription("セッション一覧を表示（Select Menuで選択可能）"),
 
       new SlashCommandBuilder()
         .setName("continue")
-        .setDescription("Start CLI session to continue from VSCode")
+        .setDescription("CLIセッションを開始")
         .addStringOption((opt) =>
           opt
             .setName("session_id")
-            .setDescription("Session ID to resume (optional, defaults to latest)")
+            .setDescription("再開するセッションID（省略時は最新）")
             .setRequired(false)
+            .setAutocomplete(true)
         ),
 
       new SlashCommandBuilder()
         .setName("ask")
-        .setDescription("Send a prompt to Claude Code")
-        .addStringOption((opt) =>
-          opt.setName("prompt").setDescription("The prompt to send").setRequired(true)
-        ),
+        .setDescription("Claude Code にプロンプトを送信（モーダル入力）"),
 
       new SlashCommandBuilder()
         .setName("output")
-        .setDescription("Show recent Claude Code output")
+        .setDescription("最新の出力を表示（ページネーション付き）")
         .addIntegerOption((opt) =>
-          opt.setName("lines").setDescription("Number of lines (default: 50)").setRequired(false)
+          opt
+            .setName("lines")
+            .setDescription("表示する行数（デフォルト: 50）")
+            .setRequired(false)
+            .setMinValue(10)
+            .setMaxValue(500)
         ),
 
-      new SlashCommandBuilder()
-        .setName("stop")
-        .setDescription("Stop the CLI session"),
+      new SlashCommandBuilder().setName("stop").setDescription("CLIセッションを停止"),
 
-      new SlashCommandBuilder()
-        .setName("status")
-        .setDescription("Show current session status"),
+      new SlashCommandBuilder().setName("status").setDescription("セッション状態を表示"),
     ];
 
     try {
@@ -194,6 +398,194 @@ export class DiscordBot extends EventEmitter {
     logger.info("Discord bot disconnected");
   }
 
+  /**
+   * Build session list with Select Menu and Buttons
+   */
+  buildSessionListComponents(
+    sessions: ClaudeSession[]
+  ): {
+    embeds: EmbedBuilder[];
+    components: ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>[];
+  } {
+    const embed = new EmbedBuilder()
+      .setTitle("📋 Claude Code セッション一覧")
+      .setColor(0x3b82f6)
+      .setDescription(
+        sessions.length === 0
+          ? "セッションが見つかりません"
+          : `${sessions.length}件のセッションが見つかりました`
+      )
+      .setTimestamp();
+
+    if (sessions.length === 0) {
+      return { embeds: [embed], components: [] };
+    }
+
+    // Add fields for top sessions
+    const displaySessions = sessions.slice(0, 5);
+    for (const session of displaySessions) {
+      const projectName = session.projectPath.split("/").pop() || session.projectPath;
+      const date = session.lastModified.toLocaleString("ja-JP", {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+
+      embed.addFields({
+        name: `📁 ${projectName}`,
+        value:
+          `ID: \`${session.id.slice(0, 8)}...\`\n` +
+          `🕐 ${date}\n` +
+          (session.summary ? `💬 ${session.summary.slice(0, 60)}...` : ""),
+        inline: true,
+      });
+    }
+
+    // Build Select Menu
+    const selectMenu = new StringSelectMenuBuilder()
+      .setCustomId("session_select")
+      .setPlaceholder("🔍 セッションを選択...")
+      .addOptions(
+        sessions.slice(0, 25).map((s) => ({
+          label: s.projectPath.split("/").pop() || s.id.slice(0, 8),
+          description: s.summary?.slice(0, 50) || `最終更新: ${s.lastModified.toLocaleDateString("ja-JP")}`,
+          value: s.id,
+          emoji: "📁",
+        }))
+      );
+
+    const selectRow = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu);
+
+    // Build action buttons
+    const buttonRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId("session_start_latest")
+        .setLabel("🚀 最新を開始")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId("session_refresh")
+        .setLabel("🔄 更新")
+        .setStyle(ButtonStyle.Secondary)
+    );
+
+    return {
+      embeds: [embed],
+      components: [selectRow, buttonRow],
+    };
+  }
+
+  /**
+   * Build paginated output with buttons
+   */
+  async sendPaginatedOutput(
+    content: string,
+    interaction: ChatInputCommandInteraction | ButtonInteraction | StringSelectMenuInteraction
+  ): Promise<void> {
+    const pages = this.splitMessage(content, 1800);
+    const messageId = `output_${Date.now()}`;
+
+    this.outputPages.set(messageId, { pages, currentPage: 0 });
+
+    // Clean up old pages after 10 minutes
+    setTimeout(() => this.outputPages.delete(messageId), 600000);
+
+    const embed = new EmbedBuilder()
+      .setTitle("📄 Claude Code 出力")
+      .setDescription(`\`\`\`ansi\n${pages[0]}\n\`\`\``)
+      .setColor(0x3b82f6)
+      .setFooter({ text: `ページ 1/${pages.length}` })
+      .setTimestamp();
+
+    const components: ActionRowBuilder<ButtonBuilder>[] = [];
+
+    if (pages.length > 1) {
+      components.push(this.buildPaginationButtons(0, pages.length, messageId));
+    }
+
+    // Add quick action buttons
+    components.push(
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId("quick_output")
+          .setLabel("🔄 更新")
+          .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId("quick_stop")
+          .setLabel("🛑 停止")
+          .setStyle(ButtonStyle.Danger)
+      )
+    );
+
+    if (interaction.isCommand()) {
+      await interaction.editReply({ embeds: [embed], components });
+    } else {
+      await (interaction as ButtonInteraction | StringSelectMenuInteraction).editReply({
+        embeds: [embed],
+        components,
+      });
+    }
+  }
+
+  /**
+   * Build status embed with action buttons
+   */
+  buildStatusEmbed(status: {
+    isRunning: boolean;
+    sessionId?: string;
+    startedAt?: Date;
+    workingDir: string;
+    bufferSize: number;
+  }): { embeds: EmbedBuilder[]; components: ActionRowBuilder<ButtonBuilder>[] } {
+    const statusIcon = status.isRunning ? "🟢" : "⚪";
+    const statusText = status.isRunning ? "実行中" : "停止中";
+
+    const embed = new EmbedBuilder()
+      .setTitle(`${statusIcon} セッション状態: ${statusText}`)
+      .setColor(status.isRunning ? 0x22c55e : 0x6b7280)
+      .addFields(
+        { name: "📁 作業ディレクトリ", value: `\`${status.workingDir}\``, inline: false },
+        { name: "📊 出力バッファ", value: `${status.bufferSize.toLocaleString()} 文字`, inline: true }
+      )
+      .setTimestamp();
+
+    if (status.sessionId) {
+      embed.addFields({ name: "🔑 セッションID", value: `\`${status.sessionId}\``, inline: true });
+    }
+
+    if (status.startedAt) {
+      embed.addFields({
+        name: "🕐 開始時刻",
+        value: status.startedAt.toLocaleString("ja-JP"),
+        inline: true,
+      });
+    }
+
+    const buttons = new ActionRowBuilder<ButtonBuilder>();
+
+    if (status.isRunning) {
+      buttons.addComponents(
+        new ButtonBuilder()
+          .setCustomId("quick_output")
+          .setLabel("📄 出力を表示")
+          .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+          .setCustomId("quick_stop")
+          .setLabel("🛑 停止")
+          .setStyle(ButtonStyle.Danger)
+      );
+    } else {
+      buttons.addComponents(
+        new ButtonBuilder()
+          .setCustomId("session_start_latest")
+          .setLabel("🚀 セッション開始")
+          .setStyle(ButtonStyle.Success)
+      );
+    }
+
+    return { embeds: [embed], components: [buttons] };
+  }
+
   async requestApproval(request: ToolApprovalRequest): Promise<ApprovalAction> {
     if (!this.channel) {
       logger.warn("No channel available, auto-approving");
@@ -209,13 +601,23 @@ export class DiscordBot extends EventEmitter {
   }
 
   private buildApprovalEmbed(request: ToolApprovalRequest): EmbedBuilder {
+    const toolIcons: Record<string, string> = {
+      Edit: "✏️",
+      Write: "📝",
+      Bash: "💻",
+      Read: "📖",
+      Delete: "🗑️",
+      default: "🔧",
+    };
+
+    const icon = toolIcons[request.tool] || toolIcons.default;
+
     const embed = new EmbedBuilder()
-      .setTitle("🔧 ツール実行の承認")
+      .setTitle(`${icon} ツール実行の承認`)
       .setColor(0xf59e0b)
       .addFields({ name: "ツール", value: `\`${request.tool}\``, inline: true })
       .setTimestamp(request.timestamp);
 
-    // Format input based on tool type
     const inputStr = this.formatToolInput(request.tool, request.input);
     if (inputStr) {
       const truncated = inputStr.length > 1000 ? inputStr.slice(0, 997) + "..." : inputStr;
@@ -362,25 +764,6 @@ export class DiscordBot extends EventEmitter {
     await this.channel.send({ embeds: [embed] });
   }
 
-  async sendOutput(content: string, title = "Claude Code 出力"): Promise<void> {
-    if (!this.channel) return;
-
-    const chunks = this.splitMessage(content, 1900);
-
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      if (!chunk) continue;
-
-      const embed = new EmbedBuilder()
-        .setTitle(chunks.length > 1 ? `${title} (${i + 1}/${chunks.length})` : title)
-        .setDescription(`\`\`\`\n${chunk}\n\`\`\``)
-        .setColor(0x3b82f6)
-        .setTimestamp();
-
-      await this.channel.send({ embeds: [embed] });
-    }
-  }
-
   private splitMessage(content: string, maxLength: number): string[] {
     const chunks: string[] = [];
     let current = "";
@@ -388,7 +771,7 @@ export class DiscordBot extends EventEmitter {
     for (const line of content.split("\n")) {
       if (current.length + line.length + 1 > maxLength) {
         if (current) chunks.push(current);
-        current = line;
+        current = line.length > maxLength ? line.slice(0, maxLength) : line;
       } else {
         current = current ? `${current}\n${line}` : line;
       }
