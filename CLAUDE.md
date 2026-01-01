@@ -137,7 +137,7 @@ pnpm test           # テスト
 ## 技術スタック
 
 - TypeScript 5.x
-- Node.js 22 LTS
+- Node.js 24 LTS
 - discord.js v14
 - node-pty (pseudo-terminal)
 - pino (logging)

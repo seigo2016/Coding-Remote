@@ -7,7 +7,7 @@ Claude CodeのHooksと連携し、ツール実行の承認をDiscord経由で行
 
 - **Bot実行場所**: WSL2（Claude Code VSCodeと同じ環境）
 - **対象環境**: Windows + WSL2 + VSCode Remote WSL
-- **Node.js**: 22 LTS
+- **Node.js**: 24 LTS
 
 ## アーキテクチャ
 
@@ -58,8 +58,8 @@ Claude CodeのHooksと連携し、ツール実行の承認をDiscord経由で行
 ### 1. 前提条件
 
 ```bash
-# Node.js 22 LTSがインストールされていること
-node -v  # v22.x.x
+# Node.js 24 LTSがインストールされていること
+node -v  # v24.x.x
 
 # pnpmがインストールされていること
 pnpm -v
@@ -249,7 +249,7 @@ hooks/
 ## 技術スタック
 
 - TypeScript 5.x
-- Node.js 22 LTS
+- Node.js 24 LTS
 - discord.js v14
 - node-pty (pseudo-terminal)
 - pino (logging)
