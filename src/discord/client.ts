@@ -412,10 +412,20 @@ export class DiscordBot extends EventEmitter {
     ];
 
     try {
-      await this.rest.put(Routes.applicationCommands(this.client.user!.id), {
-        body: commands.map((c) => c.toJSON()),
-      });
-      logger.info({ count: commands.length }, "Registered slash commands");
+      // Use guild commands for instant updates (no 1-hour delay)
+      const guildId = this.channel?.guild?.id;
+      if (guildId) {
+        await this.rest.put(Routes.applicationGuildCommands(this.client.user!.id, guildId), {
+          body: commands.map((c) => c.toJSON()),
+        });
+        logger.info({ count: commands.length, guildId }, "Registered guild slash commands");
+      } else {
+        // Fallback to global commands
+        await this.rest.put(Routes.applicationCommands(this.client.user!.id), {
+          body: commands.map((c) => c.toJSON()),
+        });
+        logger.info({ count: commands.length }, "Registered global slash commands");
+      }
     } catch (error) {
       logger.error({ error }, "Failed to register commands");
       throw error;
