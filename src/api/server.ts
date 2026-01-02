@@ -80,6 +80,12 @@ export class ApprovalServer {
 
       logger.info({ tool: request.tool, id: request.id }, "Received approval request");
 
+      // Check if connection is still alive
+      if (res.writableEnded) {
+        logger.warn({ id: request.id }, "Connection already closed before processing");
+        return;
+      }
+
       // If approve-all mode is active, auto-approve
       if (this.approveAllMode) {
         logger.info({ id: request.id }, "Auto-approved (approve-all mode)");
@@ -93,7 +99,15 @@ export class ApprovalServer {
         throw new Error("No approval handler configured");
       }
 
+      logger.info({ id: request.id }, "Waiting for Discord approval...");
       const response = await this.onApprovalRequest(request);
+      logger.info({ id: request.id, response }, "Discord approval received");
+
+      // Check if connection is still alive after waiting
+      if (res.writableEnded) {
+        logger.warn({ id: request.id }, "Connection closed while waiting for approval");
+        return;
+      }
 
       // Handle approve-all
       if (response.action === "approve_all") {
@@ -107,8 +121,10 @@ export class ApprovalServer {
       logger.info({ id: request.id }, "Response sent to hook");
     } catch (error) {
       logger.error({ error }, "Error handling approval request");
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Internal server error", approved: false }));
+      if (!res.writableEnded) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error", approved: false }));
+      }
     }
   }
 
