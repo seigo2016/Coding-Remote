@@ -33,6 +33,8 @@ async function main() {
       tool: request.tool,
       input: request.input,
       timestamp: request.timestamp,
+      cwd: request.cwd,
+      sessionId: request.sessionId,
     });
 
     return {

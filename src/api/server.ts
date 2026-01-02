@@ -76,9 +76,11 @@ export class ApprovalServer {
         tool: data.tool ?? "Unknown",
         input: data.input ?? {},
         timestamp: new Date(),
+        cwd: data.cwd ?? process.cwd(),
+        sessionId: data.sessionId,
       };
 
-      logger.info({ tool: request.tool, id: request.id }, "Received approval request");
+      logger.info({ tool: request.tool, id: request.id, cwd: request.cwd }, "Received approval request");
 
       // Check if connection is still alive
       if (res.writableEnded) {

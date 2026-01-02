@@ -3,6 +3,8 @@ export interface ApprovalRequest {
   tool: string;
   input: Record<string, unknown>;
   timestamp: Date;
+  cwd: string;
+  sessionId?: string;
 }
 
 export interface ApprovalResponse {
