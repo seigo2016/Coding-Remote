@@ -93,12 +93,20 @@ pnpm dev  # または pnpm build && pnpm start
     "PreToolUse": [
       {
         "matcher": "*",
-        "command": "node /path/to/Coding-Remote/hooks/pre-tool-use.js"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /path/to/Coding-Remote/hooks/pre-tool-use.js",
+            "timeout": 300
+          }
+        ]
       }
     ]
   }
 }
 ```
+
+**重要**: `timeout: 300` (5分) を設定することで、Discord承認を待つ時間を確保できます。
 
 ### 3. 常駐化（オプション）
 

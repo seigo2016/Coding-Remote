@@ -7,19 +7,22 @@
  * It sends an approval request to the approval server and waits for a response.
  *
  * Input (stdin): JSON with tool_name and tool_input
- * Output (stdout): JSON with "decision" field
+ * Output (stdout): JSON with permissionDecision for Claude Code
  *
  * Environment variables:
  *   APPROVAL_API_URL - API endpoint (default: http://127.0.0.1:3456/approval)
  *   APPROVAL_TIMEOUT_SECS - Timeout in seconds (default: 300, max 600)
  *
- * Setup:
- *   Add to ~/.claude/settings.json:
+ * Setup (~/.claude/settings.json):
  *   {
  *     "hooks": {
  *       "PreToolUse": [{
  *         "matcher": "*",
- *         "command": "node /path/to/hooks/pre-tool-use.js"
+ *         "hooks": [{
+ *           "type": "command",
+ *           "command": "node /path/to/hooks/pre-tool-use.js",
+ *           "timeout": 300
+ *         }]
  *       }]
  *     }
  *   }
@@ -31,6 +34,21 @@ const TIMEOUT_SECS = Math.min(600, parseInt(process.env.APPROVAL_TIMEOUT_SECS ||
 function log(message) {
   const timestamp = new Date().toISOString();
   console.error(`[${timestamp}] pre-tool-use: ${message}`);
+}
+
+/**
+ * Output response in Claude Code's expected format
+ */
+function outputResponse(decision, reason) {
+  const response = {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: decision, // "allow", "deny", or "ask"
+      permissionDecisionReason: reason || undefined,
+    },
+  };
+  log(`Output: ${JSON.stringify(response)}`);
+  console.log(JSON.stringify(response));
 }
 
 async function main() {
@@ -49,7 +67,7 @@ async function main() {
   const readOnlyTools = ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "TodoRead"];
   if (readOnlyTools.includes(tool_name)) {
     log(`Skipping approval for read-only tool: ${tool_name}`);
-    console.log(JSON.stringify({ decision: "approve" }));
+    outputResponse("allow", "Read-only tool auto-approved");
     return;
   }
 
@@ -79,7 +97,7 @@ async function main() {
 
     if (!response.ok) {
       log(`API error: ${response.status} (${elapsed}s)`);
-      console.log(JSON.stringify({ decision: "approve" }));
+      outputResponse("allow", "API error - auto-approved");
       return;
     }
 
@@ -88,26 +106,25 @@ async function main() {
 
     if (result.action === "abort") {
       log("Operation aborted by user");
-      console.log(JSON.stringify({ decision: "reject", reason: "Operation aborted by user" }));
+      outputResponse("deny", "Operation aborted by user via Discord");
+      process.exit(2); // Exit code 2 ensures denial
       return;
     }
 
-    const decision = result.approved ? "approve" : "reject";
-    log(`Final decision: ${decision}`);
-    console.log(
-      JSON.stringify({
-        decision,
-        reason: result.approved ? undefined : "Rejected by user",
-      })
-    );
+    if (result.approved) {
+      outputResponse("allow", "Approved via Discord");
+    } else {
+      outputResponse("deny", "Rejected by user via Discord");
+      process.exit(2); // Exit code 2 ensures denial
+    }
   } catch (error) {
     clearTimeout(timeoutId);
     if (error.name === "AbortError") {
-      log(`Request timed out after ${TIMEOUT_SECS}s, defaulting to approve`);
+      log(`Request timed out after ${TIMEOUT_SECS}s, defaulting to allow`);
     } else {
-      log(`Network error: ${error.message}, defaulting to approve`);
+      log(`Network error: ${error.message}, defaulting to allow`);
     }
-    console.log(JSON.stringify({ decision: "approve" }));
+    outputResponse("allow", "Network/timeout error - auto-approved");
   }
 }
 
