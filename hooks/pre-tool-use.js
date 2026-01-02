@@ -9,6 +9,9 @@
  * Input (stdin): JSON with tool_name and tool_input
  * Output (stdout): JSON with permissionDecision for Claude Code
  *
+ * Mode is read from ~/.claude-approval-mode file (managed via Discord /mode command)
+ * Modes: "discord" (default), "vscode" (native UI), "auto" (auto-approve all)
+ *
  * Environment variables:
  *   APPROVAL_API_URL - API endpoint (default: http://127.0.0.1:3456/approval)
  *   APPROVAL_TIMEOUT_SECS - Timeout in seconds (default: 300, max 600)
@@ -28,10 +31,30 @@
  *   }
  */
 
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+
 const API_URL = process.env.APPROVAL_API_URL || "http://127.0.0.1:3456/approval";
 const TIMEOUT_SECS = Math.min(600, parseInt(process.env.APPROVAL_TIMEOUT_SECS || "300", 10));
-// APPROVAL_MODE: "discord" (default), "vscode" (use native UI), "auto" (auto-approve all)
-const MODE = process.env.APPROVAL_MODE || "discord";
+const MODE_FILE = path.join(os.homedir(), ".claude-approval-mode");
+
+/**
+ * Read approval mode from file (managed by Discord /mode command)
+ */
+function getMode() {
+  try {
+    if (fs.existsSync(MODE_FILE)) {
+      const content = fs.readFileSync(MODE_FILE, "utf-8").trim();
+      if (["discord", "vscode", "auto"].includes(content)) {
+        return content;
+      }
+    }
+  } catch {
+    // Ignore errors, default to discord
+  }
+  return "discord";
+}
 
 function log(message) {
   const timestamp = new Date().toISOString();
@@ -63,10 +86,11 @@ async function main() {
 
   const { tool_name, tool_input } = input;
 
-  log(`Tool: ${tool_name}, Mode: ${MODE}`);
+  const mode = getMode();
+  log(`Tool: ${tool_name}, Mode: ${mode}`);
 
   // VSCode mode: let native UI handle approval
-  if (MODE === "vscode") {
+  if (mode === "vscode") {
     log("VSCode mode - delegating to native UI");
     // Return empty output to let Claude Code show its native dialog
     console.log("{}");
@@ -74,7 +98,7 @@ async function main() {
   }
 
   // Auto mode: approve everything automatically
-  if (MODE === "auto") {
+  if (mode === "auto") {
     log("Auto mode - auto-approving");
     outputResponse("allow", "Auto-approved (auto mode)");
     return;

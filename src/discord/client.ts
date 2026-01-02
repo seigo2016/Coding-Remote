@@ -167,6 +167,13 @@ export class DiscordBot extends EventEmitter {
           this.emit("command:status", interaction);
           break;
 
+        case "mode": {
+          await interaction.deferReply();
+          const mode = interaction.options.getString("mode");
+          this.emit("command:mode", mode, interaction);
+          break;
+        }
+
         default:
           await interaction.reply({ content: "Unknown command", ephemeral: true });
       }
@@ -387,6 +394,21 @@ export class DiscordBot extends EventEmitter {
       new SlashCommandBuilder().setName("stop").setDescription("CLIセッションを停止"),
 
       new SlashCommandBuilder().setName("status").setDescription("セッション状態を表示"),
+
+      new SlashCommandBuilder()
+        .setName("mode")
+        .setDescription("承認モードを切り替え")
+        .addStringOption((opt) =>
+          opt
+            .setName("mode")
+            .setDescription("承認モード")
+            .setRequired(false)
+            .addChoices(
+              { name: "🔔 Discord承認", value: "discord" },
+              { name: "🖥️ VSCode UI", value: "vscode" },
+              { name: "⚡ 自動承認", value: "auto" }
+            )
+        ),
     ];
 
     try {

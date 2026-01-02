@@ -4,6 +4,7 @@ import { DiscordBot } from "./discord/client.js";
 import { ApprovalServer } from "./api/server.js";
 import { PtyManager } from "./pty/manager.js";
 import { ApprovalAction } from "./discord/types.js";
+import { getApprovalMode, setApprovalMode, getModeDescription, type ApprovalMode } from "./utils/mode.js";
 import type {
   ChatInputCommandInteraction,
   ButtonInteraction,
@@ -244,6 +245,48 @@ async function main() {
 
     await interaction.editReply({ embeds, components });
   });
+
+  // /mode - Change approval mode
+  discord.on(
+    "command:mode",
+    async (mode: string | null, interaction: ChatInputCommandInteraction) => {
+      try {
+        if (mode) {
+          // Set new mode
+          setApprovalMode(mode as ApprovalMode);
+          await interaction.editReply({
+            embeds: [
+              {
+                title: "✅ モードを変更しました",
+                description: getModeDescription(mode as ApprovalMode),
+                color: 0x22c55e,
+              },
+            ],
+          });
+        } else {
+          // Show current mode
+          const currentMode = getApprovalMode();
+          await interaction.editReply({
+            embeds: [
+              {
+                title: "⚙️ 現在の承認モード",
+                description: getModeDescription(currentMode),
+                fields: [
+                  { name: "🔔 discord", value: "Discord経由で承認", inline: true },
+                  { name: "🖥️ vscode", value: "VSCodeのUI", inline: true },
+                  { name: "⚡ auto", value: "全自動承認", inline: true },
+                ],
+                color: 0x3b82f6,
+              },
+            ],
+          });
+        }
+      } catch (error) {
+        logger.error({ error }, "Failed to change mode");
+        await interaction.editReply("❌ モード変更に失敗しました");
+      }
+    }
+  );
 
   // ============================================
   // Startup
