@@ -30,6 +30,8 @@
 
 const API_URL = process.env.APPROVAL_API_URL || "http://127.0.0.1:3456/approval";
 const TIMEOUT_SECS = Math.min(600, parseInt(process.env.APPROVAL_TIMEOUT_SECS || "300", 10));
+// APPROVAL_MODE: "discord" (default), "vscode" (use native UI), "auto" (auto-approve all)
+const MODE = process.env.APPROVAL_MODE || "discord";
 
 function log(message) {
   const timestamp = new Date().toISOString();
@@ -61,7 +63,22 @@ async function main() {
 
   const { tool_name, tool_input } = input;
 
-  log(`Tool: ${tool_name}`);
+  log(`Tool: ${tool_name}, Mode: ${MODE}`);
+
+  // VSCode mode: let native UI handle approval
+  if (MODE === "vscode") {
+    log("VSCode mode - delegating to native UI");
+    // Return empty output to let Claude Code show its native dialog
+    console.log("{}");
+    return;
+  }
+
+  // Auto mode: approve everything automatically
+  if (MODE === "auto") {
+    log("Auto mode - auto-approving");
+    outputResponse("allow", "Auto-approved (auto mode)");
+    return;
+  }
 
   // Skip approval for read-only tools
   const readOnlyTools = ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "TodoRead"];
