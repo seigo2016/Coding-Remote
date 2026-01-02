@@ -101,8 +101,10 @@ export class ApprovalServer {
         logger.info("Approve-all mode activated");
       }
 
+      logger.info({ id: request.id, action: response.action, approved: response.approved }, "Sending approval response to hook");
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(response));
+      logger.info({ id: request.id }, "Response sent to hook");
     } catch (error) {
       logger.error({ error }, "Error handling approval request");
       res.writeHead(500, { "Content-Type": "application/json" });
