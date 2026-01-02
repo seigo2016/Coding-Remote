@@ -23,7 +23,7 @@
  *         "matcher": "*",
  *         "hooks": [{
  *           "type": "command",
- *           "command": "node /path/to/hooks/pre-tool-use.js",
+ *           "command": "node /path/to/hooks/pre-tool-use.cjs",
  *           "timeout": 300
  *         }]
  *       }]

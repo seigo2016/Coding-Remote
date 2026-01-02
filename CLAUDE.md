@@ -96,7 +96,7 @@ pnpm dev  # または pnpm build && pnpm start
         "hooks": [
           {
             "type": "command",
-            "command": "node /path/to/Coding-Remote/hooks/pre-tool-use.js",
+            "command": "node /path/to/Coding-Remote/hooks/pre-tool-use.cjs",
             "timeout": 300
           }
         ]
