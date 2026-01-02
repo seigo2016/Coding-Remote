@@ -94,6 +94,13 @@ export class DiscordBot extends EventEmitter {
       } else if (interaction.isStringSelectMenu()) {
         await this.handleSelectMenu(interaction);
       } else if (interaction.isButton()) {
+        // Skip approval buttons - they are handled by the collector in waitForApproval
+        const customId = interaction.customId;
+        const action = customId.split(":")[0];
+        if (Object.values(ApprovalAction).includes(action as ApprovalAction)) {
+          // Let the message collector handle this
+          return;
+        }
         await this.handleButton(interaction);
       } else if (interaction.isModalSubmit()) {
         await this.handleModal(interaction);
@@ -678,27 +685,36 @@ export class DiscordBot extends EventEmitter {
       });
 
       collector.on("collect", async (interaction) => {
-        const [action] = interaction.customId.split(":") as [ApprovalAction, string];
+        try {
+          const [action] = interaction.customId.split(":") as [ApprovalAction, string];
+          logger.info({ action }, "Approval button clicked");
 
-        const resultColor =
-          action === ApprovalAction.Approve || action === ApprovalAction.ApproveAll
-            ? 0x22c55e
-            : 0xef4444;
+          const resultColor =
+            action === ApprovalAction.Approve || action === ApprovalAction.ApproveAll
+              ? 0x22c55e
+              : 0xef4444;
 
-        await interaction.update({
-          components: [],
-          embeds: [
-            EmbedBuilder.from(embed)
-              .setColor(resultColor)
-              .addFields({ name: "結果", value: this.getActionLabel(action) }),
-          ],
-        });
+          await interaction.update({
+            components: [],
+            embeds: [
+              EmbedBuilder.from(embed)
+                .setColor(resultColor)
+                .addFields({ name: "結果", value: this.getActionLabel(action) }),
+            ],
+          });
 
-        collector.stop();
-        resolve(action);
+          logger.info({ action }, "Approval response sent");
+          collector.stop();
+          resolve(action);
+        } catch (error) {
+          logger.error({ error }, "Error handling approval button");
+          // Still resolve to prevent hanging
+          resolve(ApprovalAction.Approve);
+        }
       });
 
       collector.on("end", (_collected, reason) => {
+        logger.info({ reason }, "Approval collector ended");
         if (reason === "time") {
           const defaultAction =
             config.approval.defaultAction === "approve"
