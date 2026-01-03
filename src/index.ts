@@ -5,6 +5,7 @@ import { ApprovalServer } from "./api/server.js";
 import { PtyManager } from "./pty/manager.js";
 import { ApprovalAction } from "./discord/types.js";
 import { getApprovalMode, setApprovalMode, getModeDescription, type ApprovalMode } from "./utils/mode.js";
+import { setProjectMode, getProjectMode, clearProjectMode } from "./utils/project-mode.js";
 import type {
   ChatInputCommandInteraction,
   ButtonInteraction,
@@ -33,6 +34,8 @@ async function main() {
       tool: request.tool,
       input: request.input,
       timestamp: request.timestamp,
+      cwd: request.cwd,
+      sessionId: request.sessionId,
     });
 
     return {
@@ -246,40 +249,108 @@ async function main() {
     await interaction.editReply({ embeds, components });
   });
 
-  // /mode - Change approval mode
+  // /mode - Change approval mode (thread-aware)
   discord.on(
     "command:mode",
     async (mode: string | null, interaction: ChatInputCommandInteraction) => {
       try {
+        const threadManager = discord.getThreadManager();
+        const channel = interaction.channel;
+        const isThread = channel?.isThread();
+
+        // Get project path if in a thread (async to recover from restart)
+        let projectPath: string | null = null;
+        if (isThread && channel) {
+          projectPath = await threadManager.getProjectPathFromThreadAsync(channel);
+        }
+
         if (mode) {
-          // Set new mode
-          setApprovalMode(mode as ApprovalMode);
-          await interaction.editReply({
-            embeds: [
-              {
-                title: "✅ モードを変更しました",
-                description: getModeDescription(mode as ApprovalMode),
-                color: 0x22c55e,
-              },
-            ],
-          });
+          if (mode === "clear" && projectPath) {
+            // Clear project-specific mode
+            clearProjectMode(projectPath);
+            const globalMode = getApprovalMode();
+            await interaction.editReply({
+              embeds: [
+                {
+                  title: "🗑️ プロジェクト設定をクリア",
+                  description: `このプロジェクトの個別設定を削除しました。\nグローバル設定 (${getModeDescription(globalMode)}) が適用されます。`,
+                  color: 0x6b7280,
+                },
+              ],
+            });
+          } else if (projectPath) {
+            // Set project-specific mode
+            setProjectMode(projectPath, mode as ApprovalMode);
+            await interaction.editReply({
+              embeds: [
+                {
+                  title: "✅ プロジェクトモードを変更",
+                  description: getModeDescription(mode as ApprovalMode),
+                  fields: [
+                    { name: "📁 プロジェクト", value: `\`${projectPath}\``, inline: false },
+                  ],
+                  color: 0x22c55e,
+                },
+              ],
+            });
+          } else {
+            // Set global mode
+            setApprovalMode(mode as ApprovalMode);
+            await interaction.editReply({
+              embeds: [
+                {
+                  title: "✅ グローバルモードを変更",
+                  description: getModeDescription(mode as ApprovalMode),
+                  footer: { text: "全プロジェクトに適用（個別設定がない場合）" },
+                  color: 0x22c55e,
+                },
+              ],
+            });
+          }
         } else {
           // Show current mode
-          const currentMode = getApprovalMode();
-          await interaction.editReply({
-            embeds: [
-              {
-                title: "⚙️ 現在の承認モード",
-                description: getModeDescription(currentMode),
-                fields: [
-                  { name: "🔔 discord", value: "Discord経由で承認", inline: true },
-                  { name: "🖥️ vscode", value: "VSCodeのUI", inline: true },
-                  { name: "⚡ auto", value: "全自動承認", inline: true },
-                ],
-                color: 0x3b82f6,
-              },
-            ],
-          });
+          const globalMode = getApprovalMode();
+
+          if (projectPath) {
+            const projectMode = getProjectMode(projectPath);
+            const effectiveMode = projectMode ?? globalMode;
+            await interaction.editReply({
+              embeds: [
+                {
+                  title: "⚙️ 承認モード設定",
+                  fields: [
+                    {
+                      name: "📁 このプロジェクト",
+                      value: projectMode
+                        ? getModeDescription(projectMode)
+                        : "（グローバル設定を使用）",
+                      inline: false
+                    },
+                    { name: "🌐 グローバル", value: getModeDescription(globalMode), inline: false },
+                    { name: "▶️ 適用中", value: getModeDescription(effectiveMode), inline: false },
+                  ],
+                  footer: { text: "プロジェクト設定を削除: /mode clear" },
+                  color: 0x3b82f6,
+                },
+              ],
+            });
+          } else {
+            await interaction.editReply({
+              embeds: [
+                {
+                  title: "⚙️ グローバル承認モード",
+                  description: getModeDescription(globalMode),
+                  fields: [
+                    { name: "🔔 discord", value: "Discord経由で承認", inline: true },
+                    { name: "🖥️ vscode", value: "VSCodeのUI", inline: true },
+                    { name: "⚡ auto", value: "全自動承認", inline: true },
+                  ],
+                  footer: { text: "スレッド内で実行するとプロジェクト別設定" },
+                  color: 0x3b82f6,
+                },
+              ],
+            });
+          }
         }
       } catch (error) {
         logger.error({ error }, "Failed to change mode");

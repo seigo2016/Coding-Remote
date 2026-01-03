@@ -84,10 +84,11 @@ async function main() {
   }
   const input = JSON.parse(Buffer.concat(chunks).toString());
 
-  const { tool_name, tool_input } = input;
+  // Claude Code provides: tool_name, tool_input, cwd, session_id
+  const { tool_name, tool_input, cwd, session_id } = input;
 
   const mode = getMode();
-  log(`Tool: ${tool_name}, Mode: ${mode}`);
+  log(`Tool: ${tool_name}, Mode: ${mode}, CWD: ${cwd || "unknown"}`);
 
   // VSCode mode: let native UI handle approval
   if (mode === "vscode") {
@@ -129,6 +130,8 @@ async function main() {
       body: JSON.stringify({
         tool: tool_name,
         input: tool_input,
+        cwd: cwd || process.cwd(),
+        sessionId: session_id,
       }),
       signal: controller.signal,
     });

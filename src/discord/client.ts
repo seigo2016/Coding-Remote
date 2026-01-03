@@ -14,6 +14,7 @@ import {
   TextInputBuilder,
   TextInputStyle,
   type TextChannel,
+  type ThreadChannel,
   type Message,
   type ChatInputCommandInteraction,
   type AutocompleteInteraction,
@@ -25,6 +26,7 @@ import { EventEmitter } from "events";
 import { config } from "../config/index.js";
 import { createChildLogger } from "../utils/logger.js";
 import { ApprovalAction, type ToolApprovalRequest } from "./types.js";
+import { ThreadManager } from "./thread-manager.js";
 import type { ClaudeSession } from "../pty/types.js";
 
 const logger = createChildLogger("discord");
@@ -38,6 +40,7 @@ export class DiscordBot extends EventEmitter {
   private channel: TextChannel | null = null;
   private ready = false;
   private outputPages: Map<string, { pages: string[]; currentPage: number }> = new Map();
+  private threadManager: ThreadManager;
 
   constructor() {
     super();
@@ -47,8 +50,16 @@ export class DiscordBot extends EventEmitter {
     });
 
     this.rest = new REST({ version: "10" }).setToken(config.discord.botToken);
+    this.threadManager = new ThreadManager();
 
     this.setupEventHandlers();
+  }
+
+  /**
+   * Get thread manager for external access
+   */
+  getThreadManager(): ThreadManager {
+    return this.threadManager;
   }
 
   /**
@@ -66,6 +77,9 @@ export class DiscordBot extends EventEmitter {
         const channel = await this.client.channels.fetch(config.discord.channelId);
         if (channel?.isTextBased()) {
           this.channel = channel as TextChannel;
+          // Set up thread manager with parent channel
+          this.threadManager.setParentChannel(this.channel);
+          logger.info("Thread manager initialized");
         }
       } catch (error) {
         logger.error({ error }, "Failed to fetch channel");
@@ -397,7 +411,7 @@ export class DiscordBot extends EventEmitter {
 
       new SlashCommandBuilder()
         .setName("mode")
-        .setDescription("承認モードを切り替え")
+        .setDescription("承認モードを切り替え（スレッド内ではプロジェクト別設定）")
         .addStringOption((opt) =>
           opt
             .setName("mode")
@@ -406,7 +420,8 @@ export class DiscordBot extends EventEmitter {
             .addChoices(
               { name: "🔔 Discord承認", value: "discord" },
               { name: "🖥️ VSCode UI", value: "vscode" },
-              { name: "⚡ 自動承認", value: "auto" }
+              { name: "⚡ 自動承認", value: "auto" },
+              { name: "🗑️ プロジェクト設定をクリア", value: "clear" }
             )
         ),
     ];
@@ -631,10 +646,20 @@ export class DiscordBot extends EventEmitter {
       return ApprovalAction.Approve;
     }
 
+    // Get or create thread for this project
+    let targetChannel: TextChannel | ThreadChannel = this.channel;
+    try {
+      const thread = await this.threadManager.getOrCreateThread(request.cwd);
+      targetChannel = thread;
+      logger.info({ cwd: request.cwd, threadId: thread.id }, "Using project thread for approval");
+    } catch (error) {
+      logger.warn({ error, cwd: request.cwd }, "Failed to get/create thread, using main channel");
+    }
+
     const embed = this.buildApprovalEmbed(request);
     const row = this.buildApprovalButtons(request.id);
 
-    const message = await this.channel.send({ embeds: [embed], components: [row] });
+    const message = await targetChannel.send({ embeds: [embed], components: [row] });
 
     return this.waitForApproval(message, embed);
   }
