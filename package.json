@@ -21,7 +21,7 @@
     "pty",
     "remote"
   ],
-  "author": "",
+  "author": "seigo2016",
   "license": "MIT",
   "engines": {
     "node": ">=24.0.0"
@@ -29,7 +29,6 @@
   "dependencies": {
     "discord.js": "^14.14.1",
     "dotenv": "^16.3.1",
-    "node-pty": "^1.1.0",
     "pino": "^8.17.2",
     "pino-pretty": "^10.3.1",
     "zod": "^3.22.4"
