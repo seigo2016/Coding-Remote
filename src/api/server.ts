@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { randomUUID } from "crypto";
 import { config } from "../config/index.js";
 import { createChildLogger } from "../utils/logger.js";
+import { getEffectiveMode } from "../utils/mode.js";
 import type { ApprovalRequest, ApprovalResponse, PendingApproval } from "./types.js";
 
 const logger = createChildLogger("api");
@@ -93,6 +94,25 @@ export class ApprovalServer {
         logger.info({ id: request.id }, "Auto-approved (approve-all mode)");
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ approved: true, action: "approve_all" }));
+        return;
+      }
+
+      // Check project-specific or global mode
+      const effectiveMode = getEffectiveMode(request.cwd);
+      logger.info({ id: request.id, cwd: request.cwd, mode: effectiveMode }, "Effective approval mode");
+
+      if (effectiveMode === "auto") {
+        logger.info({ id: request.id }, "Auto-approved (auto mode for project)");
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ approved: true, action: "auto" }));
+        return;
+      }
+
+      if (effectiveMode === "vscode") {
+        // Let VSCode handle it (don't send to Discord, return special response)
+        logger.info({ id: request.id }, "Delegating to VSCode UI");
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ approved: true, action: "vscode", delegate: true }));
         return;
       }
 

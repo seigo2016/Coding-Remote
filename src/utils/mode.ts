@@ -2,12 +2,30 @@ import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { createChildLogger } from "./logger.js";
+import { getProjectMode } from "./project-mode.js";
 
 const logger = createChildLogger("mode");
 
 export type ApprovalMode = "discord" | "vscode" | "auto";
 
 const MODE_FILE = join(homedir(), ".claude-approval-mode");
+
+/**
+ * Get effective approval mode for a project
+ * Priority: project-specific > global > default
+ */
+export function getEffectiveMode(projectPath?: string): ApprovalMode {
+  // Check project-specific mode first
+  if (projectPath) {
+    const projectMode = getProjectMode(projectPath);
+    if (projectMode) {
+      logger.debug({ projectPath, mode: projectMode }, "Using project-specific mode");
+      return projectMode;
+    }
+  }
+  // Fall back to global mode
+  return getApprovalMode();
+}
 
 export function getApprovalMode(): ApprovalMode {
   try {

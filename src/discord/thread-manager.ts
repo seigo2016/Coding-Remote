@@ -65,7 +65,7 @@ export class ThreadManager {
   }
 
   /**
-   * Get project path from thread ID
+   * Get project path from thread ID (sync, cache only)
    */
   getProjectPathFromThread(threadId: string): string | null {
     for (const [path, project] of this.threads) {
@@ -73,6 +73,42 @@ export class ThreadManager {
         return path;
       }
     }
+    return null;
+  }
+
+  /**
+   * Get project path from thread ID (async, with recovery from first message)
+   * Use this when you need to recover project path after bot restart
+   */
+  async getProjectPathFromThreadAsync(thread: ThreadChannel): Promise<string | null> {
+    // Check cache first
+    const cached = this.getProjectPathFromThread(thread.id);
+    if (cached) {
+      return cached;
+    }
+
+    // Try to recover from first message
+    try {
+      const messages = await thread.messages.fetch({ limit: 5, after: "0" });
+      for (const message of messages.values()) {
+        // Look for our initial embed with project path
+        const embed = message.embeds[0];
+        if (embed?.description) {
+          const match = embed.description.match(/プロジェクト: `([^`]+)`/);
+          if (match?.[1]) {
+            const projectPath = this.normalizePath(match[1]);
+            const projectName = this.getProjectName(projectPath);
+            // Cache for future use
+            this.cacheThread(projectPath, projectName, thread);
+            logger.info({ threadId: thread.id, projectPath }, "Recovered project path from thread message");
+            return projectPath;
+          }
+        }
+      }
+    } catch (error) {
+      logger.warn({ error, threadId: thread.id }, "Failed to recover project path from thread");
+    }
+
     return null;
   }
 

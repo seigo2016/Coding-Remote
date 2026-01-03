@@ -411,7 +411,7 @@ export class DiscordBot extends EventEmitter {
 
       new SlashCommandBuilder()
         .setName("mode")
-        .setDescription("承認モードを切り替え")
+        .setDescription("承認モードを切り替え（スレッド内ではプロジェクト別設定）")
         .addStringOption((opt) =>
           opt
             .setName("mode")
@@ -420,7 +420,8 @@ export class DiscordBot extends EventEmitter {
             .addChoices(
               { name: "🔔 Discord承認", value: "discord" },
               { name: "🖥️ VSCode UI", value: "vscode" },
-              { name: "⚡ 自動承認", value: "auto" }
+              { name: "⚡ 自動承認", value: "auto" },
+              { name: "🗑️ プロジェクト設定をクリア", value: "clear" }
             )
         ),
     ];
