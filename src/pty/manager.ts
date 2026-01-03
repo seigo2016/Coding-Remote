@@ -1,4 +1,4 @@
-import * as pty from "node-pty";
+import { spawn, type ChildProcess } from "child_process";
 import { EventEmitter } from "events";
 import { readdir, readFile, stat } from "fs/promises";
 import { join } from "path";
@@ -6,7 +6,7 @@ import { homedir } from "os";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { createChildLogger } from "../utils/logger.js";
-import type { PtyStatus, PtySession, ClaudeSession } from "./types.js";
+import type { PtyStatus, PtySession, ClaudeSession, StreamMessage } from "./types.js";
 
 const execAsync = promisify(exec);
 
@@ -15,10 +15,11 @@ const logger = createChildLogger("pty");
 const MAX_OUTPUT_BUFFER = 100000; // 100KB
 
 export class PtyManager extends EventEmitter {
-  private ptyProcess: pty.IPty | null = null;
+  private claudeProcess: ChildProcess | null = null;
   private session: PtySession;
   private outputBuffer: string = "";
   private defaultWorkingDir: string;
+  private messageBuffer: string = "";
 
   constructor(workingDir: string) {
     super();
@@ -149,12 +150,12 @@ export class PtyManager extends EventEmitter {
   }
 
   /**
-   * Start Claude Code CLI with --continue or --resume flag
+   * Start Claude Code CLI with Stream-JSON mode
    * @param sessionId - Optional session ID to resume
    * @param workingDir - Optional working directory (defaults to constructor value)
    */
   async startSession(sessionId?: string, workingDir?: string): Promise<void> {
-    if (this.ptyProcess) {
+    if (this.claudeProcess) {
       logger.warn("Session already running");
       return;
     }
@@ -163,67 +164,197 @@ export class PtyManager extends EventEmitter {
     const cwd = workingDir ?? this.defaultWorkingDir;
     this.session.workingDir = cwd;
 
-    const args = sessionId ? ["--resume", sessionId] : ["--continue"];
+    // Build arguments for Stream-JSON mode
+    const args = [
+      "--print",
+      "--verbose",
+      "--input-format", "stream-json",
+      "--output-format", "stream-json",
+    ];
 
-    logger.info({ cwd, sessionId }, "Starting Claude Code session");
+    if (sessionId) {
+      args.push("--resume", sessionId);
+    }
 
-    this.ptyProcess = pty.spawn("claude", args, {
-      name: "xterm-256color",
-      cols: 120,
-      rows: 40,
+    logger.info({ cwd, sessionId, args }, "Starting Claude Code session (Stream-JSON mode)");
+
+    this.claudeProcess = spawn("claude", args, {
       cwd,
       env: process.env as Record<string, string>,
+      stdio: ["pipe", "pipe", "pipe"],
     });
 
     this.session.status = "running";
     this.session.startedAt = new Date();
     this.session.sessionId = sessionId;
     this.outputBuffer = "";
+    this.messageBuffer = "";
 
-    this.ptyProcess.onData((data) => {
-      this.handleOutput(data);
+    // Handle stdout (Stream-JSON messages)
+    this.claudeProcess.stdout?.on("data", (data: Buffer) => {
+      this.handleStreamOutput(data.toString());
     });
 
-    this.ptyProcess.onExit(({ exitCode, signal }) => {
+    // Handle stderr
+    this.claudeProcess.stderr?.on("data", (data: Buffer) => {
+      const text = data.toString();
+      logger.debug({ stderr: text }, "Claude stderr");
+      this.outputBuffer += `[stderr] ${text}`;
+    });
+
+    this.claudeProcess.on("exit", (exitCode, signal) => {
       logger.info({ exitCode, signal }, "Claude Code session exited");
       this.session.status = "stopped";
-      this.ptyProcess = null;
-      this.emit("exit", exitCode, signal);
+      this.claudeProcess = null;
+      this.emit("exit", exitCode ?? 0, signal ?? 0);
+    });
+
+    this.claudeProcess.on("error", (error) => {
+      logger.error({ error }, "Claude process error");
+      this.session.status = "stopped";
+      this.claudeProcess = null;
+      this.emit("error", error);
     });
 
     this.emit("start");
   }
 
   /**
-   * Send input to the PTY
+   * Handle Stream-JSON output from Claude
    */
-  write(data: string): void {
-    if (!this.ptyProcess) {
+  private handleStreamOutput(data: string): void {
+    this.messageBuffer += data;
+
+    // Process complete lines
+    const lines = this.messageBuffer.split("\n");
+    this.messageBuffer = lines.pop() || ""; // Keep incomplete line in buffer
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+
+      try {
+        const message: StreamMessage = JSON.parse(line);
+        this.processStreamMessage(message);
+      } catch {
+        // Not JSON, treat as raw output
+        logger.debug({ line }, "Non-JSON output");
+        this.outputBuffer += line + "\n";
+      }
+    }
+
+    this.emit("output", data);
+  }
+
+  /**
+   * Process a parsed Stream-JSON message
+   */
+  private processStreamMessage(message: StreamMessage): void {
+    const { type, subtype } = message;
+
+    switch (type) {
+      case "system":
+        if (subtype === "init") {
+          logger.info({ sessionId: message.session_id }, "Claude session initialized");
+          if (message.session_id) {
+            this.session.sessionId = message.session_id;
+          }
+        }
+        break;
+
+      case "assistant":
+        if (message.message?.content) {
+          for (const content of message.message.content) {
+            if (content.type === "text" && content.text) {
+              this.outputBuffer += content.text + "\n";
+              this.emit("assistant", content.text);
+            } else if (content.type === "tool_use") {
+              const toolInfo = `[Tool: ${content.name}]\n`;
+              this.outputBuffer += toolInfo;
+              this.emit("tool_use", content);
+            }
+          }
+        }
+        break;
+
+      case "user":
+        // Tool results come back as user messages
+        if (message.message?.content) {
+          for (const content of message.message.content) {
+            if (content.type === "tool_result") {
+              this.outputBuffer += `[Tool Result]\n`;
+            }
+          }
+        }
+        break;
+
+      case "result":
+        if (message.result) {
+          this.outputBuffer += `\n[Result] ${message.result}\n`;
+          this.emit("result", message.result);
+        }
+        break;
+
+      default:
+        logger.debug({ message }, "Unknown stream message type");
+    }
+
+    // Trim buffer if too large
+    if (this.outputBuffer.length > MAX_OUTPUT_BUFFER) {
+      this.outputBuffer = this.outputBuffer.slice(-MAX_OUTPUT_BUFFER);
+    }
+  }
+
+  /**
+   * Send a prompt to Claude via Stream-JSON format
+   */
+  sendPrompt(prompt: string): void {
+    if (!this.claudeProcess?.stdin) {
       logger.warn("No active session to write to");
       return;
     }
-    this.ptyProcess.write(data);
+
+    const message = {
+      type: "user",
+      message: {
+        role: "user",
+        content: prompt,
+      },
+    };
+
+    const jsonLine = JSON.stringify(message) + "\n";
+    logger.info({ prompt: prompt.slice(0, 100) }, "Sending prompt to Claude");
+    this.claudeProcess.stdin.write(jsonLine);
   }
 
   /**
-   * Send a line of input (with Enter)
+   * Send raw input (legacy method for compatibility)
+   */
+  write(data: string): void {
+    logger.warn("write() is deprecated for Stream-JSON mode, use sendPrompt()");
+    this.sendPrompt(data);
+  }
+
+  /**
+   * Send a line of input (legacy method for compatibility)
    */
   writeLine(data: string): void {
-    this.write(data + "\r");
+    this.sendPrompt(data);
   }
 
   /**
-   * Send Ctrl+C to interrupt
+   * Send Ctrl+C to interrupt (sends SIGINT to process)
    */
   interrupt(): void {
-    this.write("\x03");
+    if (this.claudeProcess) {
+      this.claudeProcess.kill("SIGINT");
+    }
   }
 
   /**
-   * Stop the PTY session
+   * Stop the Claude session
    */
   async stopSession(): Promise<void> {
-    if (!this.ptyProcess) {
+    if (!this.claudeProcess) {
       return;
     }
 
@@ -235,13 +366,13 @@ export class PtyManager extends EventEmitter {
     // Wait a bit then force kill
     await new Promise<void>((resolve) => {
       const timeout = setTimeout(() => {
-        if (this.ptyProcess) {
-          this.ptyProcess.kill();
+        if (this.claudeProcess) {
+          this.claudeProcess.kill("SIGKILL");
         }
         resolve();
       }, 3000);
 
-      if (this.ptyProcess) {
+      if (this.claudeProcess) {
         const onExit = () => {
           clearTimeout(timeout);
           resolve();
@@ -253,7 +384,7 @@ export class PtyManager extends EventEmitter {
       }
     });
 
-    this.ptyProcess = null;
+    this.claudeProcess = null;
     this.session.status = "stopped";
   }
 
@@ -274,20 +405,6 @@ export class PtyManager extends EventEmitter {
    */
   clearOutput(): void {
     this.outputBuffer = "";
-  }
-
-  /**
-   * Handle output from PTY
-   */
-  private handleOutput(data: string): void {
-    this.outputBuffer += data;
-
-    // Trim buffer if too large
-    if (this.outputBuffer.length > MAX_OUTPUT_BUFFER) {
-      this.outputBuffer = this.outputBuffer.slice(-MAX_OUTPUT_BUFFER);
-    }
-
-    this.emit("output", data);
   }
 
   /**
@@ -325,14 +442,14 @@ export class PtyManager extends EventEmitter {
   }
 
   /**
-   * Kill Claude processes for a session (except our own PTY)
+   * Kill Claude processes for a session (except our own process)
    * @returns Number of processes killed
    */
   async killClaudeProcesses(sessionId: string): Promise<number> {
     const pids = await this.findClaudeProcesses(sessionId);
 
-    // Get our own PTY's PID to avoid killing it
-    const ourPid = this.ptyProcess?.pid;
+    // Get our own process's PID to avoid killing it
+    const ourPid = this.claudeProcess?.pid;
     const pidsToKill = pids.filter((pid) => pid !== ourPid);
 
     if (pidsToKill.length === 0) {
@@ -356,7 +473,7 @@ export class PtyManager extends EventEmitter {
 
   /**
    * Takeover a session from VSCode or other Claude processes
-   * Kills existing processes and starts PTY with the session
+   * Kills existing processes and starts session with Stream-JSON mode
    */
   async takeoverSession(sessionId: string, workingDir?: string): Promise<{ killed: number }> {
     logger.info({ sessionId, workingDir }, "Taking over session");
@@ -369,7 +486,7 @@ export class PtyManager extends EventEmitter {
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
 
-    // Start our PTY session
+    // Start our session with Stream-JSON mode
     await this.startSession(sessionId, workingDir);
 
     return { killed };
