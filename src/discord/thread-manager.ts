@@ -32,9 +32,9 @@ export class ThreadManager {
       throw new Error("Parent channel not set");
     }
 
-    // Normalize project path
+    // Normalize project path for cache key
     const normalizedPath = this.normalizePath(projectPath);
-    const projectName = this.getProjectName(normalizedPath);
+    const projectName = this.getProjectName(projectPath);
 
     // Check if we already have this thread cached
     const cached = this.threads.get(normalizedPath);
@@ -46,13 +46,13 @@ export class ThreadManager {
     // Try to find existing thread
     const existingThread = await this.findExistingThread(projectName);
     if (existingThread) {
-      this.cacheThread(normalizedPath, projectName, existingThread);
+      this.cacheThread(normalizedPath, projectName, projectPath, existingThread);
       return existingThread;
     }
 
     // Create new thread
-    const thread = await this.createThread(projectName, normalizedPath);
-    this.cacheThread(normalizedPath, projectName, thread);
+    const thread = await this.createThread(projectName, projectPath);
+    this.cacheThread(normalizedPath, projectName, projectPath, thread);
     return thread;
   }
 
@@ -68,9 +68,9 @@ export class ThreadManager {
    * Get project path from thread ID (sync, cache only)
    */
   getProjectPathFromThread(threadId: string): string | null {
-    for (const [path, project] of this.threads) {
+    for (const [, project] of this.threads) {
       if (project.thread.id === threadId) {
-        return path;
+        return project.projectPath;
       }
     }
     return null;
@@ -96,10 +96,11 @@ export class ThreadManager {
         if (embed?.description) {
           const match = embed.description.match(/プロジェクト: `([^`]+)`/);
           if (match?.[1]) {
-            const projectPath = this.normalizePath(match[1]);
+            const projectPath = match[1];
+            const normalizedPath = this.normalizePath(projectPath);
             const projectName = this.getProjectName(projectPath);
-            // Cache for future use
-            this.cacheThread(projectPath, projectName, thread);
+            // Cache using normalized path as key, but preserve original path
+            this.cacheThread(normalizedPath, projectName, projectPath, thread);
             logger.info({ threadId: thread.id, projectPath }, "Recovered project path from thread message");
             return projectPath;
           }
@@ -221,14 +222,43 @@ export class ThreadManager {
     return `📁 ${projectName}`;
   }
 
-  private cacheThread(projectPath: string, projectName: string, thread: ThreadChannel): void {
-    this.threads.set(projectPath, {
-      projectPath,
+  private cacheThread(normalizedKey: string, projectName: string, originalPath: string, thread: ThreadChannel): void {
+    this.threads.set(normalizedKey, {
+      projectPath: originalPath,
       projectName,
       thread,
       createdAt: new Date(),
       lastActivity: new Date(),
     });
+  }
+
+  /**
+   * Fix the project path in a thread's initial message
+   * Use this to correct legacy threads with wrong paths
+   */
+  async fixThreadProjectPath(thread: ThreadChannel, correctPath: string): Promise<boolean> {
+    try {
+      const messages = await thread.messages.fetch({ limit: 5, after: "0" });
+      for (const message of messages.values()) {
+        const embed = message.embeds[0];
+        if (embed?.description?.includes("プロジェクト:")) {
+          const projectName = this.getProjectName(correctPath);
+          await message.edit({
+            embeds: [{
+              title: `📁 ${projectName}`,
+              description: `プロジェクト: \`${correctPath}\`\n\nこのスレッドでは、このプロジェクトに関する:\n- ツール実行の承認リクエスト\n- CLIセッションの操作\n- 出力の表示\n\nが行われます。`,
+              color: 0x3b82f6,
+              timestamp: new Date().toISOString(),
+            }],
+          });
+          logger.info({ threadId: thread.id, correctPath }, "Fixed thread project path");
+          return true;
+        }
+      }
+    } catch (error) {
+      logger.error({ error, threadId: thread.id }, "Failed to fix thread project path");
+    }
+    return false;
   }
 
   /**

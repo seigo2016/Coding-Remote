@@ -1,13 +1,79 @@
-# Claude Code Approval Bot
+# Claude Code Remote - Discord Bot for Remote Claude Code Control
 
-Claude CodeのHooksと連携し、ツール実行の承認をDiscord経由で行うBot。
-離席時もDiscordからCLIセッションの操作が可能。
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue.svg)](https://www.typescriptlang.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-24+-green.svg)](https://nodejs.org/)
+[![Discord.js](https://img.shields.io/badge/discord.js-v14-5865F2.svg)](https://discord.js.org/)
 
-## 動作環境
+Claude CodeのHooksと連携し、**ツール実行の承認をDiscord経由で行う**Bot。
+離席時もDiscordからCLIセッションの操作が可能になり、モバイルからでもコーディングセッションを継続できます。
 
-- **Bot実行場所**: WSL2（Claude Code VSCodeと同じ環境）
-- **対象環境**: Windows + WSL2 + VSCode Remote WSL
-- **Node.js**: 24 LTS
+![Overview](docs/images/overview.png)
+
+## 主な機能
+
+### 1. Discord経由のツール承認
+
+Claude Codeがファイル編集やコマンド実行を行う前に、Discordで承認/拒否できます。
+
+![Approval Buttons](docs/images/approval-buttons.png)
+
+| ボタン | 動作 |
+|--------|------|
+| ✅ 許可 | このツール実行を許可 |
+| ❌ 拒否 | このツール実行を拒否 |
+| 📋 全て許可 | 以降のツール実行を全て許可 |
+| 🛑 中断 | セッションを中断 |
+
+### 2. プロジェクト別スレッド管理
+
+作業ディレクトリごとにDiscordスレッドを自動作成。プロジェクトが多くても通知が整理されます。
+
+![Project Threads](docs/images/project-threads.png)
+
+- `📁 プロジェクト名` 形式でスレッドを自動作成
+- 既存スレッドは再利用（アーカイブ済みでも自動復元）
+- スレッド内でコマンドを実行するとそのプロジェクトに紐づく
+
+### 3. Discordからのリモートコーディング
+
+`/ask` コマンドでプロンプトを送信し、Claudeの応答を**自動的にスレッドに送信**。VSCodeを開いていなくても、モバイルからコーディングを進められます。
+
+```
+/ask "このファイルのバグを修正して"
+→ Claudeが作業
+→ 応答が自動的にスレッドに送信される
+```
+
+![Ask Command](docs/images/ask-command.png)
+
+### 4. セッション引き継ぎ（/takeover）
+
+VSCodeで作業中のセッションをDiscordから引き継げます。PCの前を離れる時に便利。
+
+```
+/takeover <session_id>
+```
+
+VSCode側のClaudeプロセスを終了し、Discordから同じセッションを継続します。
+
+### 5. 承認モード設定
+
+プロジェクトごとに異なる承認モードを設定可能。信頼できるプロジェクトは自動承認にすることも。
+
+| モード | 説明 |
+|--------|------|
+| `discord` | Discord経由で承認（デフォルト） |
+| `vscode` | VSCodeのネイティブダイアログで承認 |
+| `auto` | 全ツールを自動承認（注意して使用） |
+
+```
+/mode auto      # スレッド内で実行するとそのプロジェクトのみ auto に
+/mode clear     # プロジェクト別設定を削除
+```
+
+**優先順位**: プロジェクト別設定 > グローバル設定 > デフォルト(discord)
+
+---
 
 ## アーキテクチャ
 
@@ -17,62 +83,89 @@ Claude CodeのHooksと連携し、ツール実行の承認をDiscord経由で行
 │                          │                                  │
 │                          ↓ PreToolUse Hook                  │
 │              ┌───────────────────────────┐                  │
-│              │  hooks/pre-tool-use.js    │                  │
+│              │  hooks/pre-tool-use.cjs   │                  │
 │              │  → HTTP API に承認要求     │                  │
 │              └───────────────────────────┘                  │
 └─────────────────────────────────────────────────────────────┘
                            ↓
 ┌─────────────────────────────────────────────────────────────┐
-│         Approval Bot（WSL2でバックグラウンド常駐）            │
+│         Approval Bot（バックグラウンド常駐）                  │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │  HTTP API Server ←→ Discord Bot ←→ PTY Manager    │    │
-│  │  (localhost:3456)     (discord.js)   (node-pty)   │    │
+│  │  HTTP API Server ←→ Discord Bot ←→ Session Manager │    │
+│  │  (localhost:3456)     (discord.js)  (Stream-JSON)  │    │
 │  └─────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────┘
                            ↓
-                    ┌──────────────┐
-                    │   Discord    │
-                    │  承認ボタン   │
-                    │  /コマンド    │
-                    └──────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                        Discord                               │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
+│  │ 承認ボタン   │  │ /コマンド   │  │ 自動応答スレッド     │  │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-## 機能
+### Stream-JSON モード
 
-### プロジェクト別スレッド管理
-- 作業ディレクトリ（cwd）ごとにDiscordスレッドを自動作成
-- プロジェクトごとに会話が分離され、通知が整理される
-- スレッド名は `📁 プロジェクト名` 形式
-- 既存スレッドがあれば再利用、アーカイブ済みでも自動復元
+Discord経由で `/ask` を使う場合、内部では Claude CLI を `--print --input-format stream-json --output-format stream-json` モードで起動しています。これにより:
 
-### 承認ワークフロー
-- VSCode Claude Code拡張のツール実行前にHookが発火
-- Discordの対応プロジェクトスレッドにボタン付き承認リクエストを送信
-- ✅許可 / ❌拒否 / 📋全て許可 / 🛑中断 から選択
+- プロンプトをJSON形式で送信
+- 応答をリアルタイムで受信・パース
+- セッション履歴は `.jsonl` ファイルで共有（VSCodeと同じセッションを継続可能）
 
-### Discordコマンド
+---
+
+## Discordコマンド一覧
+
 | コマンド | 説明 |
 |---------|------|
 | `/sessions` | 利用可能なセッション一覧を表示 |
-| `/continue [session_id]` | CLIセッションを開始（省略時は最新） |
-| `/ask <prompt>` | プロンプトをCLIに送信 |
+| `/continue [session_id]` | セッションを初期化（省略時は最新） |
+| `/takeover <session_id>` | VSCode等からセッションを引き継ぐ（既存プロセスを終了） |
+| `/ask` | プロンプトを送信（モーダル入力、応答は自動送信） |
 | `/output [lines]` | 最新の出力を表示（デフォルト50行） |
-| `/stop` | CLIセッションを停止 |
+| `/stop` | セッションを停止 |
 | `/status` | セッション状態を表示 |
+| `/mode [mode]` | 承認モードを変更/確認（スレッド内ではプロジェクト別） |
+| `/mode clear` | プロジェクト別設定を削除（スレッド内のみ） |
 
-## WSL2 セットアップ手順
+### 典型的なワークフロー
 
-### 1. 前提条件
+#### デスクトップ作業時
+```
+1. VSCode + Claude Code拡張を普段通り使用
+2. ツール実行時にDiscordの対応プロジェクトスレッドに承認リクエストが届く
+3. デスクトップでもDiscordでも承認可能
+4. 複数プロジェクトを同時に作業していても、スレッドで整理される
+```
+
+#### 離席時（モバイルから）
+```
+1. /sessions                    # セッション一覧を確認
+2. /takeover abc123             # VSCodeから引き継ぎ
+3. /ask "READMEを更新して"       # プロンプトを送信
+   → 自動で応答がスレッドに送信される
+4. （承認リクエストが来たらボタンで承認）
+5. /ask "次の機能を実装して"     # 続けてプロンプト送信
+6. /stop                        # 作業終了
+```
+
+---
+
+## セットアップ
+
+### 必要なもの
+
+- Node.js 24 以上
+- Discord Bot トークン（[Discord Developer Portal](https://discord.com/developers/applications)で作成）
+- Discord サーバーの管理権限
+- Claude Code CLI がインストール済み
+
+### 1. インストール
 
 ```bash
-# Node.js 24 LTSがインストールされていること
-node -v  # v24.x.x
-
-# pnpmがインストールされていること
-pnpm -v
-
-# Claude Code CLIがインストールされていること
-claude --version
+git clone https://github.com/seigo2016/Coding-Remote.git
+cd Coding-Remote
+pnpm install
 ```
 
 ### 2. Discord Bot作成
@@ -86,37 +179,36 @@ claude --version
 4. OAuth2設定:
    - OAuth2 → URL Generator
    - Scopes: `bot`, `applications.commands`
-   - Bot Permissions: `Send Messages`, `Embed Links`, `Use Slash Commands`
+   - Bot Permissions: `Send Messages`, `Create Public Threads`, `Send Messages in Threads`, `Embed Links`
 5. 生成されたURLでBotをサーバーに招待
 
-### 3. プロジェクトセットアップ
+### 3. 環境変数設定
 
 ```bash
-# リポジトリクローン
-git clone https://github.com/seigo2016/Coding-Remote.git
-cd Coding-Remote
-
-# 依存関係インストール
-pnpm install
-
-# 環境変数設定
 cp .env.example .env
 ```
 
 `.env` を編集:
+
 ```env
 DISCORD_BOT_TOKEN=your_bot_token_here
 DISCORD_OWNER_ID=your_discord_user_id
-DISCORD_CHANNEL_ID=your_channel_id
-API_PORT=3456
-API_HOST=127.0.0.1
-CLAUDE_WORKING_DIR=/path/to/your/project
-LOG_LEVEL=info
+DISCORD_CHANNEL_ID=notification_channel_id
 ```
 
-### 4. Claude Code Hooks設定
+### 4. Bot起動
 
-`~/.claude/settings.json` を編集（なければ作成）:
+```bash
+pnpm build
+pnpm start
+
+# または開発モード
+pnpm dev
+```
+
+### 5. Claude Code Hooks設定
+
+`~/.claude/settings.json` に追加:
 
 ```json
 {
@@ -124,92 +216,24 @@ LOG_LEVEL=info
     "PreToolUse": [
       {
         "matcher": "*",
-        "command": "node /path/to/Coding-Remote/hooks/pre-tool-use.js"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /path/to/Coding-Remote/hooks/pre-tool-use.cjs",
+            "timeout": 300
+          }
+        ]
       }
     ]
   }
 }
 ```
 
-### 5. Bot起動
+> **重要**: `timeout: 300` (5分) を設定することで、Discord承認を待つ時間を確保できます。
 
-```bash
-# 開発モード
-pnpm dev
+---
 
-# または本番モード
-pnpm build
-pnpm start
-```
-
-### 6. 常駐化（systemd）
-
-`~/.config/systemd/user/claude-approval-bot.service` を作成:
-
-```ini
-[Unit]
-Description=Claude Code Approval Bot
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/path/to/Coding-Remote
-ExecStart=/usr/bin/node dist/index.js
-Restart=always
-RestartSec=10
-Environment=NODE_ENV=production
-
-[Install]
-WantedBy=default.target
-```
-
-有効化:
-```bash
-systemctl --user daemon-reload
-systemctl --user enable claude-approval-bot
-systemctl --user start claude-approval-bot
-
-# ログ確認
-journalctl --user -u claude-approval-bot -f
-
-# WSL2起動時に自動起動させる場合
-sudo loginctl enable-linger $USER
-```
-
-### 7. 常駐化（PM2を使う場合）
-
-```bash
-# PM2インストール
-npm install -g pm2
-
-# 起動
-pm2 start pnpm --name "claude-approval-bot" -- start
-
-# 自動起動設定
-pm2 startup
-pm2 save
-```
-
-## 使い方
-
-### デスクトップ作業時
-1. VSCode + Claude Code拡張を普段通り使用
-2. ツール実行時にDiscordの対応プロジェクトスレッドに承認リクエストが届く
-3. デスクトップでもDiscordでも承認可能
-4. 複数プロジェクトを同時に作業していても、スレッドで整理される
-
-### 離席時
-1. Discordで `/continue` → CLIセッション開始
-2. `/ask 質問やプロンプト` → 指示を送信
-3. `/output` → 結果確認
-4. `/stop` → セッション終了
-
-### スレッド管理
-- 各プロジェクトの作業は自動的に専用スレッドに振り分け
-- スレッドはプロジェクトパス（cwd）に基づいて自動作成
-- 長期間使用されないスレッドは自動アーカイブ可能
-
-## 環境変数
+## 環境変数一覧
 
 | 変数 | 説明 | デフォルト |
 |------|------|-----------|
@@ -220,20 +244,10 @@ pm2 save
 | `API_HOST` | APIサーバーホスト | 127.0.0.1 |
 | `APPROVAL_TIMEOUT_MS` | 承認タイムアウト (ms) | 300000 |
 | `APPROVAL_DEFAULT_ACTION` | タイムアウト時の動作 | approve |
-| `CLAUDE_WORKING_DIR` | CLIセッションの作業ディレクトリ | (カレント) |
+| `CLAUDE_WORKING_DIR` | CLIセッションの作業ディレクトリ | (カレントディレクトリ) |
 | `LOG_LEVEL` | ログレベル | info |
 
-## 開発コマンド
-
-```bash
-pnpm install        # 依存関係インストール
-pnpm dev            # 開発モード (tsx watch)
-pnpm build          # ビルド
-pnpm start          # 本番起動
-pnpm typecheck      # 型チェック
-pnpm lint           # Lint
-pnpm test           # テスト
-```
+---
 
 ## プロジェクト構造
 
@@ -250,28 +264,82 @@ src/
 │   ├── thread-manager.ts # プロジェクト別スレッド管理
 │   └── types.ts
 ├── pty/
-│   ├── manager.ts        # PTYセッション管理 (node-pty)
+│   ├── manager.ts        # セッション管理 (Stream-JSON)
 │   └── types.ts
 └── utils/
     ├── logger.ts         # pino logger
-    ├── mode.ts           # 承認モード管理
+    ├── mode.ts           # グローバル承認モード管理
+    ├── project-mode.ts   # プロジェクト別承認モード管理
     └── error.ts          # カスタムエラー
 
 hooks/
 └── pre-tool-use.cjs      # Claude Code Hook スクリプト
+
+docs/
+└── pty-input-investigation.md  # 技術調査ドキュメント
 ```
+
+---
+
+## 開発
+
+```bash
+pnpm install        # 依存関係インストール
+pnpm dev            # 開発モード (tsx watch)
+pnpm build          # ビルド
+pnpm start          # 本番起動
+pnpm typecheck      # 型チェック
+pnpm lint           # Lint
+pnpm test           # テスト
+```
+
+---
 
 ## 技術スタック
 
-- TypeScript 5.x
-- Node.js 24 LTS
-- discord.js v14
-- node-pty (pseudo-terminal)
-- pino (logging)
-- zod (validation)
-- vitest (testing)
-- tsup (build)
+- **TypeScript 5.x** - 型安全な開発
+- **Node.js 24 LTS** - ランタイム
+- **discord.js v14** - Discord Bot フレームワーク
+- **pino** - 高速ロギング
+- **zod** - スキーマバリデーション
+- **vitest** - テストフレームワーク
+- **tsup** - バンドラー
+
+---
+
+## トラブルシューティング
+
+### 承認リクエストが届かない
+
+1. Botが起動しているか確認: `pnpm start` のログを確認
+2. Hookが設定されているか確認: `~/.claude/settings.json` を確認
+3. APIが到達可能か確認: `curl http://localhost:3456/health`
+
+### セッションが見つからない
+
+- Claude Codeでセッションを開始した後に `/sessions` を実行してください
+- セッションファイルは `~/.claude/projects/` 以下に保存されます
+
+### /ask の応答が来ない
+
+1. `/continue` または `/takeover` でセッションを初期化してから `/ask` を実行してください
+2. ログで `Claude response completed` が出力されているか確認
+3. `--resume` に必要なセッションIDが設定されているか確認
+
+### VSCodeとの連携がうまくいかない
+
+- VSCode側のClaudeセッションと同じセッションIDを使用してください
+- `/takeover` でVSCode側のプロセスを終了してから作業してください
+
+---
 
 ## ライセンス
 
-MIT
+MIT License
+
+---
+
+## 関連リンク
+
+- [Claude Code 公式ドキュメント](https://docs.anthropic.com/claude-code)
+- [discord.js ガイド](https://discordjs.guide/)

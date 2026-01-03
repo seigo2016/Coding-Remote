@@ -44,15 +44,33 @@ Claude CodeのHooksと連携し、ツール実行の承認をDiscord経由で行
 - Discordの対応プロジェクトスレッドにボタン付き承認リクエストを送信
 - ✅許可 / ❌拒否 / 📋全て許可 / 🛑中断 から選択
 
+### 承認モード設定
+プロジェクトごとに異なる承認モードを設定可能。
+
+| モード | 説明 |
+|--------|------|
+| `discord` | Discord経由で承認（デフォルト） |
+| `vscode` | VSCodeのネイティブダイアログで承認 |
+| `auto` | 全ツールを自動承認（注意） |
+
+**優先順位**: プロジェクト別設定 > グローバル設定 > デフォルト(discord)
+
+設定ファイル:
+- グローバル: `~/.claude-approval-mode`
+- プロジェクト別: `~/.claude-approval-modes.json`
+
 ### Discordコマンド
 | コマンド | 説明 |
 |---------|------|
 | `/sessions` | 利用可能なセッション一覧を表示 |
 | `/continue [session_id]` | CLIセッションを開始（省略時は最新） |
+| `/takeover <session_id>` | VSCode等からセッションを引き継ぐ（既存プロセスを終了） |
 | `/ask <prompt>` | プロンプトをCLIに送信 |
 | `/output [lines]` | 最新の出力を表示（デフォルト50行） |
 | `/stop` | CLIセッションを停止 |
 | `/status` | セッション状態を表示 |
+| `/mode [mode]` | 承認モードを変更/確認（スレッド内ではプロジェクト別） |
+| `/mode clear` | プロジェクト別設定を削除（スレッド内のみ） |
 
 ## プロジェクト構造
 
@@ -73,7 +91,8 @@ src/
 │   └── types.ts
 └── utils/
     ├── logger.ts         # pino logger
-    ├── mode.ts           # 承認モード管理
+    ├── mode.ts           # グローバル承認モード管理
+    ├── project-mode.ts   # プロジェクト別承認モード管理
     └── error.ts          # カスタムエラー
 
 hooks/

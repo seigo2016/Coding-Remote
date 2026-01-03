@@ -49,23 +49,63 @@ async function main() {
     logger.debug({ length: data.length }, "PTY output received");
   });
 
+  // Send result to Discord when Claude completes a response
+  pty.on("result", async (result: string) => {
+    logger.info({ resultLength: result.length }, "Claude response completed");
+
+    // Truncate if too long for Discord embed
+    const maxLength = 4000;
+    const displayResult = result.length > maxLength
+      ? result.slice(0, maxLength - 100) + "\n\n... (truncated, use /output for full response)"
+      : result;
+
+    try {
+      // Get the thread for current working directory
+      const threadManager = discord.getThreadManager();
+      const cwd = pty.currentWorkingDir;
+      const thread = await threadManager.getOrCreateThread(cwd);
+
+      await thread.send({
+        embeds: [{
+          title: "✅ Claude Response",
+          description: `\`\`\`\n${displayResult}\n\`\`\``,
+          color: 0x22c55e,
+          timestamp: new Date().toISOString(),
+        }],
+      });
+    } catch (error) {
+      logger.error({ error }, "Failed to send result to Discord");
+    }
+  });
+
   pty.on("exit", (exitCode: number, signal: number) => {
-    logger.info({ exitCode, signal }, "PTY session exited");
-    discord.sendNotification(
-      `Claude Code セッションが終了しました (code: ${exitCode})`,
-      exitCode === 0 ? "info" : "warning"
-    );
+    logger.info({ exitCode, signal }, "Session stopped");
+    // Only notify on explicit stop, not on per-prompt process exits
   });
 
   // ============================================
   // Discord Command Handlers
   // ============================================
 
-  // /sessions - Show session list with Select Menu
+  // /sessions - Show session list with Select Menu (thread-aware)
   discord.on("command:sessions", async (interaction: ChatInputCommandInteraction) => {
     try {
-      const sessions = await refreshSessionCache();
-      const { embeds, components } = discord.buildSessionListComponents(sessions);
+      // Get project path from thread if in a thread
+      const threadManager = discord.getThreadManager();
+      const channel = interaction.channel;
+      let projectPath: string | undefined;
+
+      if (channel?.isThread()) {
+        const path = await threadManager.getProjectPathFromThreadAsync(channel);
+        if (path) {
+          projectPath = path;
+        }
+      }
+
+      const sessions = projectPath
+        ? await pty.listSessions(projectPath)
+        : await refreshSessionCache();
+      const { embeds, components } = discord.buildSessionListComponents(sessions, projectPath);
       await interaction.editReply({ embeds, components });
     } catch (error) {
       logger.error({ error }, "Failed to list sessions");
@@ -73,18 +113,32 @@ async function main() {
     }
   });
 
-  // Refresh button on session list
+  // Refresh button on session list (thread-aware)
   discord.on("command:sessions:refresh", async (interaction: ButtonInteraction) => {
     try {
-      const sessions = await refreshSessionCache();
-      const { embeds, components } = discord.buildSessionListComponents(sessions);
+      // Get project path from thread if in a thread
+      const threadManager = discord.getThreadManager();
+      const channel = interaction.channel;
+      let projectPath: string | undefined;
+
+      if (channel?.isThread()) {
+        const path = await threadManager.getProjectPathFromThreadAsync(channel);
+        if (path) {
+          projectPath = path;
+        }
+      }
+
+      const sessions = projectPath
+        ? await pty.listSessions(projectPath)
+        : await refreshSessionCache();
+      const { embeds, components } = discord.buildSessionListComponents(sessions, projectPath);
       await interaction.editReply({ embeds, components });
     } catch (error) {
       logger.error({ error }, "Failed to refresh sessions");
     }
   });
 
-  // /continue - Start session (with autocomplete support)
+  // /continue - Start session (with autocomplete support, thread-aware)
   discord.on(
     "command:continue",
     async (sessionId: string | null, interaction: ChatInputCommandInteraction) => {
@@ -94,10 +148,23 @@ async function main() {
           return;
         }
 
-        await pty.startSession(sessionId ?? undefined);
+        // Get project path from thread if in a thread
+        const threadManager = discord.getThreadManager();
+        const channel = interaction.channel;
+        let workingDir: string | undefined;
+
+        if (channel?.isThread()) {
+          const projectPath = await threadManager.getProjectPathFromThreadAsync(channel);
+          if (projectPath) {
+            workingDir = projectPath;
+          }
+        }
+
+        await pty.startSession(sessionId ?? undefined, workingDir);
+        const dirInfo = workingDir ? ` (📁 ${workingDir})` : "";
         const msg = sessionId
-          ? `✅ セッション \`${sessionId.slice(0, 8)}...\` を再開しました`
-          : "✅ 最新のセッションを開始しました";
+          ? `✅ セッション \`${sessionId.slice(0, 8)}...\` を再開しました${dirInfo}`
+          : `✅ 最新のセッションを開始しました${dirInfo}`;
         await interaction.editReply(msg);
       } catch (error) {
         logger.error({ error }, "Failed to start session");
@@ -106,7 +173,7 @@ async function main() {
     }
   );
 
-  // Start session from Select Menu or Button
+  // Start session from Select Menu or Button (thread-aware)
   discord.on(
     "command:continue:select",
     async (sessionId: string | null, interaction: ButtonInteraction | StringSelectMenuInteraction) => {
@@ -120,10 +187,23 @@ async function main() {
           return;
         }
 
-        await pty.startSession(sessionId ?? undefined);
+        // Get project path from thread if in a thread
+        const threadManager = discord.getThreadManager();
+        const channel = interaction.channel;
+        let workingDir: string | undefined;
+
+        if (channel?.isThread()) {
+          const projectPath = await threadManager.getProjectPathFromThreadAsync(channel);
+          if (projectPath) {
+            workingDir = projectPath;
+          }
+        }
+
+        await pty.startSession(sessionId ?? undefined, workingDir);
+        const dirInfo = workingDir ? ` (📁 ${workingDir})` : "";
         const msg = sessionId
-          ? `✅ セッション \`${sessionId.slice(0, 8)}...\` を再開しました`
-          : "✅ 最新のセッションを開始しました";
+          ? `✅ セッション \`${sessionId.slice(0, 8)}...\` を再開しました${dirInfo}`
+          : `✅ 最新のセッションを開始しました${dirInfo}`;
         await interaction.editReply({ embeds: [], components: [], content: msg });
       } catch (error) {
         logger.error({ error }, "Failed to start session");
@@ -248,6 +328,41 @@ async function main() {
 
     await interaction.editReply({ embeds, components });
   });
+
+  // /takeover - Take over session from VSCode (thread-aware)
+  discord.on(
+    "command:takeover",
+    async (sessionId: string, interaction: ChatInputCommandInteraction) => {
+      try {
+        if (pty.isRunning) {
+          await interaction.editReply("⚠️ 既にPTYセッションが実行中です。先に `/stop` してください");
+          return;
+        }
+
+        // Get project path from thread if in a thread
+        const threadManager = discord.getThreadManager();
+        const channel = interaction.channel;
+        let workingDir: string | undefined;
+
+        if (channel?.isThread()) {
+          const projectPath = await threadManager.getProjectPathFromThreadAsync(channel);
+          if (projectPath) {
+            workingDir = projectPath;
+          }
+        }
+
+        const { killed } = await pty.takeoverSession(sessionId, workingDir);
+        const dirInfo = workingDir ? ` (📁 ${workingDir})` : "";
+        const killedInfo = killed > 0 ? `\n🔪 ${killed}個のプロセスを終了しました` : "";
+        await interaction.editReply(
+          `✅ セッション \`${sessionId.slice(0, 8)}...\` を引き継ぎました${dirInfo}${killedInfo}`
+        );
+      } catch (error) {
+        logger.error({ error }, "Failed to takeover session");
+        await interaction.editReply("❌ セッション引き継ぎに失敗しました");
+      }
+    }
+  );
 
   // /mode - Change approval mode (thread-aware)
   discord.on(

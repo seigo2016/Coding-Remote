@@ -63,6 +63,13 @@ export class DiscordBot extends EventEmitter {
   }
 
   /**
+   * Get Discord client for direct channel access
+   */
+  getClient(): Client {
+    return this.client;
+  }
+
+  /**
    * Update session cache for autocomplete
    */
   updateSessionCache(sessions: ClaudeSession[]): void {
@@ -180,6 +187,13 @@ export class DiscordBot extends EventEmitter {
           await interaction.deferReply();
           this.emit("command:status", interaction);
           break;
+
+        case "takeover": {
+          await interaction.deferReply();
+          const sessionId = interaction.options.getString("session_id", true);
+          this.emit("command:takeover", sessionId, interaction);
+          break;
+        }
 
         case "mode": {
           await interaction.deferReply();
@@ -410,6 +424,17 @@ export class DiscordBot extends EventEmitter {
       new SlashCommandBuilder().setName("status").setDescription("セッション状態を表示"),
 
       new SlashCommandBuilder()
+        .setName("takeover")
+        .setDescription("VSCode等からセッションを引き継ぐ（既存プロセスを終了）")
+        .addStringOption((opt) =>
+          opt
+            .setName("session_id")
+            .setDescription("引き継ぐセッションID")
+            .setRequired(true)
+            .setAutocomplete(true)
+        ),
+
+      new SlashCommandBuilder()
         .setName("mode")
         .setDescription("承認モードを切り替え（スレッド内ではプロジェクト別設定）")
         .addStringOption((opt) =>
@@ -454,21 +479,30 @@ export class DiscordBot extends EventEmitter {
 
   /**
    * Build session list with Select Menu and Buttons
+   * @param sessions - List of sessions to display
+   * @param projectPath - Optional project path to show in title (for thread context)
    */
   buildSessionListComponents(
-    sessions: ClaudeSession[]
+    sessions: ClaudeSession[],
+    projectPath?: string
   ): {
     embeds: EmbedBuilder[];
     components: ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>[];
   } {
+    const projectName = projectPath?.split("/").pop();
+    const title = projectName
+      ? `📋 ${projectName} のセッション`
+      : "📋 Claude Code セッション一覧";
+    const description = sessions.length === 0
+      ? projectName
+        ? "このプロジェクトのセッションが見つかりません"
+        : "セッションが見つかりません"
+      : `${sessions.length}件のセッションが見つかりました`;
+
     const embed = new EmbedBuilder()
-      .setTitle("📋 Claude Code セッション一覧")
+      .setTitle(title)
       .setColor(0x3b82f6)
-      .setDescription(
-        sessions.length === 0
-          ? "セッションが見つかりません"
-          : `${sessions.length}件のセッションが見つかりました`
-      )
+      .setDescription(description)
       .setTimestamp();
 
     if (sessions.length === 0) {

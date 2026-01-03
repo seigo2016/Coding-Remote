@@ -38,11 +38,39 @@ const os = require("os");
 const API_URL = process.env.APPROVAL_API_URL || "http://127.0.0.1:3456/approval";
 const TIMEOUT_SECS = Math.min(600, parseInt(process.env.APPROVAL_TIMEOUT_SECS || "300", 10));
 const MODE_FILE = path.join(os.homedir(), ".claude-approval-mode");
+const PROJECT_MODE_FILE = path.join(os.homedir(), ".claude-approval-modes.json");
 
 /**
- * Read approval mode from file (managed by Discord /mode command)
+ * Normalize project path for consistent lookup
  */
-function getMode() {
+function normalizePath(p) {
+  return p.replace(/\/+$/, "").toLowerCase();
+}
+
+/**
+ * Read project-specific mode from JSON file
+ */
+function getProjectMode(projectPath) {
+  try {
+    if (fs.existsSync(PROJECT_MODE_FILE)) {
+      const content = fs.readFileSync(PROJECT_MODE_FILE, "utf-8");
+      const data = JSON.parse(content);
+      const normalized = normalizePath(projectPath);
+      const mode = data.modes?.[normalized];
+      if (mode && ["discord", "vscode", "auto"].includes(mode)) {
+        return mode;
+      }
+    }
+  } catch {
+    // Ignore errors
+  }
+  return null;
+}
+
+/**
+ * Read global approval mode from file
+ */
+function getGlobalMode() {
   try {
     if (fs.existsSync(MODE_FILE)) {
       const content = fs.readFileSync(MODE_FILE, "utf-8").trim();
@@ -51,9 +79,22 @@ function getMode() {
       }
     }
   } catch {
-    // Ignore errors, default to discord
+    // Ignore errors
   }
   return "discord";
+}
+
+/**
+ * Get effective mode for a project (project-specific > global > default)
+ */
+function getEffectiveMode(projectPath) {
+  if (projectPath) {
+    const projectMode = getProjectMode(projectPath);
+    if (projectMode) {
+      return projectMode;
+    }
+  }
+  return getGlobalMode();
 }
 
 function log(message) {
@@ -87,7 +128,7 @@ async function main() {
   // Claude Code provides: tool_name, tool_input, cwd, session_id
   const { tool_name, tool_input, cwd, session_id } = input;
 
-  const mode = getMode();
+  const mode = getEffectiveMode(cwd);
   log(`Tool: ${tool_name}, Mode: ${mode}, CWD: ${cwd || "unknown"}`);
 
   // VSCode mode: let native UI handle approval
