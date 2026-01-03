@@ -150,71 +150,27 @@ export class PtyManager extends EventEmitter {
   }
 
   /**
-   * Start Claude Code CLI with Stream-JSON mode
+   * Initialize a session for sending prompts
+   * This doesn't start a process immediately - processes are spawned per-prompt
    * @param sessionId - Optional session ID to resume
    * @param workingDir - Optional working directory (defaults to constructor value)
    */
   async startSession(sessionId?: string, workingDir?: string): Promise<void> {
-    if (this.claudeProcess) {
-      logger.warn("Session already running");
+    if (this.session.status === "running") {
+      logger.warn("Session already initialized");
       return;
     }
 
     // Update working directory if provided
     const cwd = workingDir ?? this.defaultWorkingDir;
     this.session.workingDir = cwd;
-
-    // Build arguments for Stream-JSON mode
-    const args = [
-      "--print",
-      "--verbose",
-      "--input-format", "stream-json",
-      "--output-format", "stream-json",
-    ];
-
-    if (sessionId) {
-      args.push("--resume", sessionId);
-    }
-
-    logger.info({ cwd, sessionId, args }, "Starting Claude Code session (Stream-JSON mode)");
-
-    this.claudeProcess = spawn("claude", args, {
-      cwd,
-      env: process.env as Record<string, string>,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
     this.session.status = "running";
     this.session.startedAt = new Date();
     this.session.sessionId = sessionId;
     this.outputBuffer = "";
     this.messageBuffer = "";
 
-    // Handle stdout (Stream-JSON messages)
-    this.claudeProcess.stdout?.on("data", (data: Buffer) => {
-      this.handleStreamOutput(data.toString());
-    });
-
-    // Handle stderr
-    this.claudeProcess.stderr?.on("data", (data: Buffer) => {
-      const text = data.toString();
-      logger.debug({ stderr: text }, "Claude stderr");
-      this.outputBuffer += `[stderr] ${text}`;
-    });
-
-    this.claudeProcess.on("exit", (exitCode, signal) => {
-      logger.info({ exitCode, signal }, "Claude Code session exited");
-      this.session.status = "stopped";
-      this.claudeProcess = null;
-      this.emit("exit", exitCode ?? 0, signal ?? 0);
-    });
-
-    this.claudeProcess.on("error", (error) => {
-      logger.error({ error }, "Claude process error");
-      this.session.status = "stopped";
-      this.claudeProcess = null;
-      this.emit("error", error);
-    });
+    logger.info({ cwd, sessionId }, "Session initialized (Stream-JSON mode, per-prompt spawning)");
 
     this.emit("start");
   }
@@ -306,13 +262,71 @@ export class PtyManager extends EventEmitter {
 
   /**
    * Send a prompt to Claude via Stream-JSON format
+   * Since --print mode exits after each response, we spawn a new process for each prompt
+   * but use --resume to continue the same session
    */
-  sendPrompt(prompt: string): void {
-    if (!this.claudeProcess?.stdin) {
-      logger.warn("No active session to write to");
+  async sendPrompt(prompt: string): Promise<void> {
+    // If a process is already running, wait for it or reject
+    if (this.claudeProcess) {
+      logger.warn("A prompt is already being processed, please wait");
       return;
     }
 
+    const cwd = this.session.workingDir;
+    const sessionId = this.session.sessionId;
+
+    // Build arguments for Stream-JSON mode
+    const args = [
+      "--print",
+      "--verbose",
+      "--input-format", "stream-json",
+      "--output-format", "stream-json",
+    ];
+
+    if (sessionId) {
+      args.push("--resume", sessionId);
+    }
+
+    logger.info({ cwd, sessionId, prompt: prompt.slice(0, 100) }, "Sending prompt to Claude");
+
+    this.claudeProcess = spawn("claude", args, {
+      cwd,
+      env: process.env as Record<string, string>,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    this.session.status = "running";
+    this.messageBuffer = "";
+
+    // Handle stdout (Stream-JSON messages)
+    this.claudeProcess.stdout?.on("data", (data: Buffer) => {
+      this.handleStreamOutput(data.toString());
+    });
+
+    // Handle stderr
+    this.claudeProcess.stderr?.on("data", (data: Buffer) => {
+      const text = data.toString();
+      logger.debug({ stderr: text }, "Claude stderr");
+      this.outputBuffer += `[stderr] ${text}`;
+    });
+
+    this.claudeProcess.on("exit", (exitCode, signal) => {
+      logger.info({ exitCode, signal }, "Claude prompt completed");
+      this.claudeProcess = null;
+      // Keep status as "running" since session is still active (can send more prompts)
+      // Only emit exit if it was an error
+      if (exitCode !== 0) {
+        this.emit("error", new Error(`Claude exited with code ${exitCode}`));
+      }
+    });
+
+    this.claudeProcess.on("error", (error) => {
+      logger.error({ error }, "Claude process error");
+      this.claudeProcess = null;
+      this.emit("error", error);
+    });
+
+    // Send the prompt
     const message = {
       type: "user",
       message: {
@@ -322,8 +336,8 @@ export class PtyManager extends EventEmitter {
     };
 
     const jsonLine = JSON.stringify(message) + "\n";
-    logger.info({ prompt: prompt.slice(0, 100) }, "Sending prompt to Claude");
-    this.claudeProcess.stdin.write(jsonLine);
+    this.claudeProcess.stdin?.write(jsonLine);
+    this.claudeProcess.stdin?.end(); // Close stdin to signal end of input
   }
 
   /**
@@ -342,50 +356,44 @@ export class PtyManager extends EventEmitter {
   }
 
   /**
-   * Send Ctrl+C to interrupt (sends SIGINT to process)
+   * Interrupt the currently running prompt (sends SIGINT to process)
    */
   interrupt(): void {
     if (this.claudeProcess) {
+      logger.info("Interrupting current prompt");
       this.claudeProcess.kill("SIGINT");
     }
   }
 
   /**
-   * Stop the Claude session
+   * Stop the session (kills any running process and marks session as stopped)
    */
   async stopSession(): Promise<void> {
-    if (!this.claudeProcess) {
-      return;
-    }
+    logger.info("Stopping session");
 
-    logger.info("Stopping Claude Code session");
+    // Kill any running process
+    if (this.claudeProcess) {
+      this.claudeProcess.kill("SIGTERM");
 
-    // Try graceful exit first
-    this.interrupt();
+      // Wait a bit then force kill
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(() => {
+          if (this.claudeProcess) {
+            this.claudeProcess.kill("SIGKILL");
+          }
+          resolve();
+        }, 3000);
 
-    // Wait a bit then force kill
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => {
-        if (this.claudeProcess) {
-          this.claudeProcess.kill("SIGKILL");
-        }
-        resolve();
-      }, 3000);
-
-      if (this.claudeProcess) {
-        const onExit = () => {
+        this.claudeProcess?.on("exit", () => {
           clearTimeout(timeout);
           resolve();
-        };
-        this.once("exit", onExit);
-      } else {
-        clearTimeout(timeout);
-        resolve();
-      }
-    });
+        });
+      });
+    }
 
     this.claudeProcess = null;
     this.session.status = "stopped";
+    this.emit("exit", 0, 0);
   }
 
   /**
@@ -473,7 +481,7 @@ export class PtyManager extends EventEmitter {
 
   /**
    * Takeover a session from VSCode or other Claude processes
-   * Kills existing processes and starts session with Stream-JSON mode
+   * Kills existing processes and initializes session for prompts
    */
   async takeoverSession(sessionId: string, workingDir?: string): Promise<{ killed: number }> {
     logger.info({ sessionId, workingDir }, "Taking over session");
@@ -486,7 +494,7 @@ export class PtyManager extends EventEmitter {
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
 
-    // Start our session with Stream-JSON mode
+    // Initialize session (no process started yet, will spawn per-prompt)
     await this.startSession(sessionId, workingDir);
 
     return { killed };

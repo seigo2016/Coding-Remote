@@ -79,11 +79,8 @@ async function main() {
   });
 
   pty.on("exit", (exitCode: number, signal: number) => {
-    logger.info({ exitCode, signal }, "PTY session exited");
-    discord.sendNotification(
-      `Claude Code セッションが終了しました (code: ${exitCode})`,
-      exitCode === 0 ? "info" : "warning"
-    );
+    logger.info({ exitCode, signal }, "Session stopped");
+    // Only notify on explicit stop, not on per-prompt process exits
   });
 
   // ============================================
