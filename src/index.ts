@@ -49,6 +49,35 @@ async function main() {
     logger.debug({ length: data.length }, "PTY output received");
   });
 
+  // Send result to Discord when Claude completes a response
+  pty.on("result", async (result: string) => {
+    logger.info({ resultLength: result.length }, "Claude response completed");
+
+    // Truncate if too long for Discord embed
+    const maxLength = 4000;
+    const displayResult = result.length > maxLength
+      ? result.slice(0, maxLength - 100) + "\n\n... (truncated, use /output for full response)"
+      : result;
+
+    try {
+      // Get the thread for current working directory
+      const threadManager = discord.getThreadManager();
+      const cwd = pty.currentWorkingDir;
+      const thread = await threadManager.getOrCreateThread(cwd);
+
+      await thread.send({
+        embeds: [{
+          title: "✅ Claude Response",
+          description: `\`\`\`\n${displayResult}\n\`\`\``,
+          color: 0x22c55e,
+          timestamp: new Date().toISOString(),
+        }],
+      });
+    } catch (error) {
+      logger.error({ error }, "Failed to send result to Discord");
+    }
+  });
+
   pty.on("exit", (exitCode: number, signal: number) => {
     logger.info({ exitCode, signal }, "PTY session exited");
     discord.sendNotification(
