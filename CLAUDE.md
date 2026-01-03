@@ -33,10 +33,31 @@ Claude CodeのHooksと連携し、ツール実行の承認をDiscord経由で行
 
 ## 機能
 
+### プロジェクト別スレッド管理
+- 作業ディレクトリ（cwd）ごとにDiscordスレッドを自動作成
+- プロジェクトごとに会話が分離され、通知が整理される
+- スレッド名は `📁 プロジェクト名` 形式
+- 既存スレッドがあれば再利用、アーカイブ済みでも自動復元
+
 ### 承認ワークフロー
 - VSCode Claude Code拡張のツール実行前にHookが発火
-- Discordにボタン付き承認リクエストを送信
+- Discordの対応プロジェクトスレッドにボタン付き承認リクエストを送信
 - ✅許可 / ❌拒否 / 📋全て許可 / 🛑中断 から選択
+
+### 承認モード設定
+プロジェクトごとに異なる承認モードを設定可能。
+
+| モード | 説明 |
+|--------|------|
+| `discord` | Discord経由で承認（デフォルト） |
+| `vscode` | VSCodeのネイティブダイアログで承認 |
+| `auto` | 全ツールを自動承認（注意） |
+
+**優先順位**: プロジェクト別設定 > グローバル設定 > デフォルト(discord)
+
+設定ファイル:
+- グローバル: `~/.claude-approval-mode`
+- プロジェクト別: `~/.claude-approval-modes.json`
 
 ### Discordコマンド
 | コマンド | 説明 |
@@ -47,6 +68,8 @@ Claude CodeのHooksと連携し、ツール実行の承認をDiscord経由で行
 | `/output [lines]` | 最新の出力を表示（デフォルト50行） |
 | `/stop` | CLIセッションを停止 |
 | `/status` | セッション状態を表示 |
+| `/mode [mode]` | 承認モードを変更/確認（スレッド内ではプロジェクト別） |
+| `/mode clear` | プロジェクト別設定を削除（スレッド内のみ） |
 
 ## プロジェクト構造
 
@@ -60,16 +83,19 @@ src/
 │   └── types.ts
 ├── discord/
 │   ├── client.ts         # Discord Bot（承認UI + コマンド）
+│   ├── thread-manager.ts # プロジェクト別スレッド管理
 │   └── types.ts
 ├── pty/
 │   ├── manager.ts        # PTYセッション管理 (node-pty)
 │   └── types.ts
 └── utils/
     ├── logger.ts         # pino logger
+    ├── mode.ts           # グローバル承認モード管理
+    ├── project-mode.ts   # プロジェクト別承認モード管理
     └── error.ts          # カスタムエラー
 
 hooks/
-└── pre-tool-use.js       # Claude Code Hook スクリプト
+└── pre-tool-use.cjs      # Claude Code Hook スクリプト
 ```
 
 ## セットアップ

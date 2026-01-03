@@ -5,6 +5,7 @@ import { ApprovalServer } from "./api/server.js";
 import { PtyManager } from "./pty/manager.js";
 import { ApprovalAction } from "./discord/types.js";
 import { getApprovalMode, setApprovalMode, getModeDescription, type ApprovalMode } from "./utils/mode.js";
+import { setProjectMode, getProjectMode, clearProjectMode } from "./utils/project-mode.js";
 import type {
   ChatInputCommandInteraction,
   ButtonInteraction,
@@ -33,6 +34,8 @@ async function main() {
       tool: request.tool,
       input: request.input,
       timestamp: request.timestamp,
+      cwd: request.cwd,
+      sessionId: request.sessionId,
     });
 
     return {
@@ -58,11 +61,25 @@ async function main() {
   // Discord Command Handlers
   // ============================================
 
-  // /sessions - Show session list with Select Menu
+  // /sessions - Show session list with Select Menu (thread-aware)
   discord.on("command:sessions", async (interaction: ChatInputCommandInteraction) => {
     try {
-      const sessions = await refreshSessionCache();
-      const { embeds, components } = discord.buildSessionListComponents(sessions);
+      // Get project path from thread if in a thread
+      const threadManager = discord.getThreadManager();
+      const channel = interaction.channel;
+      let projectPath: string | undefined;
+
+      if (channel?.isThread()) {
+        const path = await threadManager.getProjectPathFromThreadAsync(channel);
+        if (path) {
+          projectPath = path;
+        }
+      }
+
+      const sessions = projectPath
+        ? await pty.listSessions(projectPath)
+        : await refreshSessionCache();
+      const { embeds, components } = discord.buildSessionListComponents(sessions, projectPath);
       await interaction.editReply({ embeds, components });
     } catch (error) {
       logger.error({ error }, "Failed to list sessions");
@@ -70,18 +87,32 @@ async function main() {
     }
   });
 
-  // Refresh button on session list
+  // Refresh button on session list (thread-aware)
   discord.on("command:sessions:refresh", async (interaction: ButtonInteraction) => {
     try {
-      const sessions = await refreshSessionCache();
-      const { embeds, components } = discord.buildSessionListComponents(sessions);
+      // Get project path from thread if in a thread
+      const threadManager = discord.getThreadManager();
+      const channel = interaction.channel;
+      let projectPath: string | undefined;
+
+      if (channel?.isThread()) {
+        const path = await threadManager.getProjectPathFromThreadAsync(channel);
+        if (path) {
+          projectPath = path;
+        }
+      }
+
+      const sessions = projectPath
+        ? await pty.listSessions(projectPath)
+        : await refreshSessionCache();
+      const { embeds, components } = discord.buildSessionListComponents(sessions, projectPath);
       await interaction.editReply({ embeds, components });
     } catch (error) {
       logger.error({ error }, "Failed to refresh sessions");
     }
   });
 
-  // /continue - Start session (with autocomplete support)
+  // /continue - Start session (with autocomplete support, thread-aware)
   discord.on(
     "command:continue",
     async (sessionId: string | null, interaction: ChatInputCommandInteraction) => {
@@ -91,10 +122,23 @@ async function main() {
           return;
         }
 
-        await pty.startSession(sessionId ?? undefined);
+        // Get project path from thread if in a thread
+        const threadManager = discord.getThreadManager();
+        const channel = interaction.channel;
+        let workingDir: string | undefined;
+
+        if (channel?.isThread()) {
+          const projectPath = await threadManager.getProjectPathFromThreadAsync(channel);
+          if (projectPath) {
+            workingDir = projectPath;
+          }
+        }
+
+        await pty.startSession(sessionId ?? undefined, workingDir);
+        const dirInfo = workingDir ? ` (📁 ${workingDir})` : "";
         const msg = sessionId
-          ? `✅ セッション \`${sessionId.slice(0, 8)}...\` を再開しました`
-          : "✅ 最新のセッションを開始しました";
+          ? `✅ セッション \`${sessionId.slice(0, 8)}...\` を再開しました${dirInfo}`
+          : `✅ 最新のセッションを開始しました${dirInfo}`;
         await interaction.editReply(msg);
       } catch (error) {
         logger.error({ error }, "Failed to start session");
@@ -103,7 +147,7 @@ async function main() {
     }
   );
 
-  // Start session from Select Menu or Button
+  // Start session from Select Menu or Button (thread-aware)
   discord.on(
     "command:continue:select",
     async (sessionId: string | null, interaction: ButtonInteraction | StringSelectMenuInteraction) => {
@@ -117,10 +161,23 @@ async function main() {
           return;
         }
 
-        await pty.startSession(sessionId ?? undefined);
+        // Get project path from thread if in a thread
+        const threadManager = discord.getThreadManager();
+        const channel = interaction.channel;
+        let workingDir: string | undefined;
+
+        if (channel?.isThread()) {
+          const projectPath = await threadManager.getProjectPathFromThreadAsync(channel);
+          if (projectPath) {
+            workingDir = projectPath;
+          }
+        }
+
+        await pty.startSession(sessionId ?? undefined, workingDir);
+        const dirInfo = workingDir ? ` (📁 ${workingDir})` : "";
         const msg = sessionId
-          ? `✅ セッション \`${sessionId.slice(0, 8)}...\` を再開しました`
-          : "✅ 最新のセッションを開始しました";
+          ? `✅ セッション \`${sessionId.slice(0, 8)}...\` を再開しました${dirInfo}`
+          : `✅ 最新のセッションを開始しました${dirInfo}`;
         await interaction.editReply({ embeds: [], components: [], content: msg });
       } catch (error) {
         logger.error({ error }, "Failed to start session");
@@ -246,40 +303,108 @@ async function main() {
     await interaction.editReply({ embeds, components });
   });
 
-  // /mode - Change approval mode
+  // /mode - Change approval mode (thread-aware)
   discord.on(
     "command:mode",
     async (mode: string | null, interaction: ChatInputCommandInteraction) => {
       try {
+        const threadManager = discord.getThreadManager();
+        const channel = interaction.channel;
+        const isThread = channel?.isThread();
+
+        // Get project path if in a thread (async to recover from restart)
+        let projectPath: string | null = null;
+        if (isThread && channel) {
+          projectPath = await threadManager.getProjectPathFromThreadAsync(channel);
+        }
+
         if (mode) {
-          // Set new mode
-          setApprovalMode(mode as ApprovalMode);
-          await interaction.editReply({
-            embeds: [
-              {
-                title: "✅ モードを変更しました",
-                description: getModeDescription(mode as ApprovalMode),
-                color: 0x22c55e,
-              },
-            ],
-          });
+          if (mode === "clear" && projectPath) {
+            // Clear project-specific mode
+            clearProjectMode(projectPath);
+            const globalMode = getApprovalMode();
+            await interaction.editReply({
+              embeds: [
+                {
+                  title: "🗑️ プロジェクト設定をクリア",
+                  description: `このプロジェクトの個別設定を削除しました。\nグローバル設定 (${getModeDescription(globalMode)}) が適用されます。`,
+                  color: 0x6b7280,
+                },
+              ],
+            });
+          } else if (projectPath) {
+            // Set project-specific mode
+            setProjectMode(projectPath, mode as ApprovalMode);
+            await interaction.editReply({
+              embeds: [
+                {
+                  title: "✅ プロジェクトモードを変更",
+                  description: getModeDescription(mode as ApprovalMode),
+                  fields: [
+                    { name: "📁 プロジェクト", value: `\`${projectPath}\``, inline: false },
+                  ],
+                  color: 0x22c55e,
+                },
+              ],
+            });
+          } else {
+            // Set global mode
+            setApprovalMode(mode as ApprovalMode);
+            await interaction.editReply({
+              embeds: [
+                {
+                  title: "✅ グローバルモードを変更",
+                  description: getModeDescription(mode as ApprovalMode),
+                  footer: { text: "全プロジェクトに適用（個別設定がない場合）" },
+                  color: 0x22c55e,
+                },
+              ],
+            });
+          }
         } else {
           // Show current mode
-          const currentMode = getApprovalMode();
-          await interaction.editReply({
-            embeds: [
-              {
-                title: "⚙️ 現在の承認モード",
-                description: getModeDescription(currentMode),
-                fields: [
-                  { name: "🔔 discord", value: "Discord経由で承認", inline: true },
-                  { name: "🖥️ vscode", value: "VSCodeのUI", inline: true },
-                  { name: "⚡ auto", value: "全自動承認", inline: true },
-                ],
-                color: 0x3b82f6,
-              },
-            ],
-          });
+          const globalMode = getApprovalMode();
+
+          if (projectPath) {
+            const projectMode = getProjectMode(projectPath);
+            const effectiveMode = projectMode ?? globalMode;
+            await interaction.editReply({
+              embeds: [
+                {
+                  title: "⚙️ 承認モード設定",
+                  fields: [
+                    {
+                      name: "📁 このプロジェクト",
+                      value: projectMode
+                        ? getModeDescription(projectMode)
+                        : "（グローバル設定を使用）",
+                      inline: false
+                    },
+                    { name: "🌐 グローバル", value: getModeDescription(globalMode), inline: false },
+                    { name: "▶️ 適用中", value: getModeDescription(effectiveMode), inline: false },
+                  ],
+                  footer: { text: "プロジェクト設定を削除: /mode clear" },
+                  color: 0x3b82f6,
+                },
+              ],
+            });
+          } else {
+            await interaction.editReply({
+              embeds: [
+                {
+                  title: "⚙️ グローバル承認モード",
+                  description: getModeDescription(globalMode),
+                  fields: [
+                    { name: "🔔 discord", value: "Discord経由で承認", inline: true },
+                    { name: "🖥️ vscode", value: "VSCodeのUI", inline: true },
+                    { name: "⚡ auto", value: "全自動承認", inline: true },
+                  ],
+                  footer: { text: "スレッド内で実行するとプロジェクト別設定" },
+                  color: 0x3b82f6,
+                },
+              ],
+            });
+          }
         }
       } catch (error) {
         logger.error({ error }, "Failed to change mode");
