@@ -3,8 +3,12 @@ import { EventEmitter } from "events";
 import { readdir, readFile, stat } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
+import { exec } from "child_process";
+import { promisify } from "util";
 import { createChildLogger } from "../utils/logger.js";
 import type { PtyStatus, PtySession, ClaudeSession } from "./types.js";
+
+const execAsync = promisify(exec);
 
 const logger = createChildLogger("pty");
 
@@ -294,5 +298,80 @@ export class PtyManager extends EventEmitter {
       ...this.session,
       outputBuffer: this.outputBuffer,
     };
+  }
+
+  /**
+   * Find Claude processes using a specific session ID
+   * Returns array of PIDs
+   */
+  async findClaudeProcesses(sessionId: string): Promise<number[]> {
+    try {
+      // Find Claude processes with --resume <sessionId>
+      const { stdout } = await execAsync(
+        `ps aux | grep -E 'claude.*--resume.*${sessionId}' | grep -v grep | awk '{print $2}'`
+      );
+      const pids = stdout
+        .trim()
+        .split("\n")
+        .filter((pid) => pid)
+        .map((pid) => parseInt(pid, 10))
+        .filter((pid) => !isNaN(pid));
+
+      logger.debug({ sessionId, pids }, "Found Claude processes");
+      return pids;
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Kill Claude processes for a session (except our own PTY)
+   * @returns Number of processes killed
+   */
+  async killClaudeProcesses(sessionId: string): Promise<number> {
+    const pids = await this.findClaudeProcesses(sessionId);
+
+    // Get our own PTY's PID to avoid killing it
+    const ourPid = this.ptyProcess?.pid;
+    const pidsToKill = pids.filter((pid) => pid !== ourPid);
+
+    if (pidsToKill.length === 0) {
+      logger.debug({ sessionId }, "No Claude processes to kill");
+      return 0;
+    }
+
+    let killed = 0;
+    for (const pid of pidsToKill) {
+      try {
+        process.kill(pid, "SIGTERM");
+        logger.info({ pid, sessionId }, "Killed Claude process");
+        killed++;
+      } catch (error) {
+        logger.warn({ error, pid }, "Failed to kill process");
+      }
+    }
+
+    return killed;
+  }
+
+  /**
+   * Takeover a session from VSCode or other Claude processes
+   * Kills existing processes and starts PTY with the session
+   */
+  async takeoverSession(sessionId: string, workingDir?: string): Promise<{ killed: number }> {
+    logger.info({ sessionId, workingDir }, "Taking over session");
+
+    // Kill any existing Claude processes using this session
+    const killed = await this.killClaudeProcesses(sessionId);
+
+    // Wait a bit for processes to terminate
+    if (killed > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+
+    // Start our PTY session
+    await this.startSession(sessionId, workingDir);
+
+    return { killed };
   }
 }

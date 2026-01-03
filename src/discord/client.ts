@@ -188,6 +188,13 @@ export class DiscordBot extends EventEmitter {
           this.emit("command:status", interaction);
           break;
 
+        case "takeover": {
+          await interaction.deferReply();
+          const sessionId = interaction.options.getString("session_id", true);
+          this.emit("command:takeover", sessionId, interaction);
+          break;
+        }
+
         case "mode": {
           await interaction.deferReply();
           const mode = interaction.options.getString("mode");
@@ -415,6 +422,17 @@ export class DiscordBot extends EventEmitter {
       new SlashCommandBuilder().setName("stop").setDescription("CLIセッションを停止"),
 
       new SlashCommandBuilder().setName("status").setDescription("セッション状態を表示"),
+
+      new SlashCommandBuilder()
+        .setName("takeover")
+        .setDescription("VSCode等からセッションを引き継ぐ（既存プロセスを終了）")
+        .addStringOption((opt) =>
+          opt
+            .setName("session_id")
+            .setDescription("引き継ぐセッションID")
+            .setRequired(true)
+            .setAutocomplete(true)
+        ),
 
       new SlashCommandBuilder()
         .setName("mode")

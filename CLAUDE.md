@@ -64,6 +64,7 @@ Claude CodeのHooksと連携し、ツール実行の承認をDiscord経由で行
 |---------|------|
 | `/sessions` | 利用可能なセッション一覧を表示 |
 | `/continue [session_id]` | CLIセッションを開始（省略時は最新） |
+| `/takeover <session_id>` | VSCode等からセッションを引き継ぐ（既存プロセスを終了） |
 | `/ask <prompt>` | プロンプトをCLIに送信 |
 | `/output [lines]` | 最新の出力を表示（デフォルト50行） |
 | `/stop` | CLIセッションを停止 |

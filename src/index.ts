@@ -303,6 +303,41 @@ async function main() {
     await interaction.editReply({ embeds, components });
   });
 
+  // /takeover - Take over session from VSCode (thread-aware)
+  discord.on(
+    "command:takeover",
+    async (sessionId: string, interaction: ChatInputCommandInteraction) => {
+      try {
+        if (pty.isRunning) {
+          await interaction.editReply("⚠️ 既にPTYセッションが実行中です。先に `/stop` してください");
+          return;
+        }
+
+        // Get project path from thread if in a thread
+        const threadManager = discord.getThreadManager();
+        const channel = interaction.channel;
+        let workingDir: string | undefined;
+
+        if (channel?.isThread()) {
+          const projectPath = await threadManager.getProjectPathFromThreadAsync(channel);
+          if (projectPath) {
+            workingDir = projectPath;
+          }
+        }
+
+        const { killed } = await pty.takeoverSession(sessionId, workingDir);
+        const dirInfo = workingDir ? ` (📁 ${workingDir})` : "";
+        const killedInfo = killed > 0 ? `\n🔪 ${killed}個のプロセスを終了しました` : "";
+        await interaction.editReply(
+          `✅ セッション \`${sessionId.slice(0, 8)}...\` を引き継ぎました${dirInfo}${killedInfo}`
+        );
+      } catch (error) {
+        logger.error({ error }, "Failed to takeover session");
+        await interaction.editReply("❌ セッション引き継ぎに失敗しました");
+      }
+    }
+  );
+
   // /mode - Change approval mode (thread-aware)
   discord.on(
     "command:mode",
