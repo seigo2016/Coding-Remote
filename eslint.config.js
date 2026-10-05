@@ -13,6 +13,7 @@ export default [
         sourceType: "module",
       },
       globals: {
+        Buffer: "readonly",
         console: "readonly",
         process: "readonly",
         setTimeout: "readonly",
